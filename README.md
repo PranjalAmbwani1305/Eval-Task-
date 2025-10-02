@@ -10,11 +10,6 @@ An AI-Powered Framework for Automated Task Management, Scheduling, and Role-Base
 
 EVAL AI TASK is designed to solve two primary challenges in project management: the manual overhead of assigning and scheduling tasks, and the subjectivity in performance evaluation. It integrates an **Agentic AI** for automation and an **EvalTrack** system for AI-powered, role-based reviews.
 
-### Workflow Diagram
-
-![Workflow](image_e7350e.png)
-*(To make this image appear, make sure you have uploaded the diagram file, e.g., `workflow.png`, to your repository and updated the filename in the markdown above)*
-
 ---
 
 ## ✨ Key Features
