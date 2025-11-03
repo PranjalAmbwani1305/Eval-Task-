@@ -96,7 +96,7 @@ def classify_performance(tasks):
 # ------------------------------
 # Step 4: Streamlit App
 # ------------------------------
-st.title("📊 AI-Powered Task Completion & Review")
+st.title("AI-Powered Task Completion & Review")
 
 role = st.sidebar.selectbox("Login as", ["Team Member", "Manager", "Client"])
 
@@ -104,13 +104,13 @@ role = st.sidebar.selectbox("Login as", ["Team Member", "Manager", "Client"])
 # Team Member Section
 # ------------------------------
 if role == "Team Member":
-    st.header("👩‍💻 Team Member Section")
-    company = st.text_input("🏢 Company Name")
-    employee = st.text_input("👤 Your Name")
-    task = st.text_input("📝 Task Title")
-    completion = st.slider("✅ Completion %", 0, 100, 0)
+    st.header("Team Member Section")
+    company = st.text_input("Company Name")
+    employee = st.text_input("Your Name")
+    task = st.text_input("Task Title")
+    completion = st.slider("Completion %", 0, 100, 0)
 
-    if st.button("📩 Submit Task"):
+    if st.button("Submit Task"):
         if company and employee and task:
             marks = lin_reg.predict([[completion]])[0]
             status = log_reg.predict([[completion]])[0]
@@ -132,17 +132,17 @@ if role == "Team Member":
                     })
                 }]
             )
-            st.success(f"✅ Task '{task}' submitted by {employee}")
+            st.success(f"Task '{task}' submitted by {employee}")
         else:
-            st.error("❌ Fill all fields before submitting")
+            st.error("Fill all fields before submitting")
 
 # ------------------------------
 # Client Section
 # ------------------------------
 elif role == "Client":
-    st.header("👨‍💼 Client Section")
-    company = st.text_input("🏢 Company Name")
-    if st.button("🔍 View Approved Tasks") and company:
+    st.header("Client Section")
+    company = st.text_input("Company Name")
+    if st.button("View Approved Tasks") and company:
         res = index.query(
             vector=random_vector(),
             top_k=100,
@@ -150,16 +150,16 @@ elif role == "Client":
             filter={"company": {"$eq": company}, "reviewed": {"$eq": True}}
         )
         if res.matches:
-            st.subheader(f"📌 Approved Tasks for {company}")
+            st.subheader(f" Approved Tasks for {company}")
             for match in res.matches:
                 md = match.metadata or {}
                 st.write(
-                    f"👤 {md.get('employee','?')} | **{md.get('task','?')}** → {md.get('completion',0)}% "
+                    f"{md.get('employee','?')} | **{md.get('task','?')}** → {md.get('completion',0)}% "
                     f"(Marks: {md.get('marks',0):.2f}) | Status: {md.get('status','?')}"
                 )
-                st.write(f"📝 Manager Sentiment: {md.get('sentiment','N/A')}")
+                st.write(f"Manager Sentiment: {md.get('sentiment','N/A')}")
         else:
-            st.warning("⚠️ No approved tasks found.")
+            st.warning("No approved tasks found.")
     elif not company:
         st.error("❌ Enter company name")
 
@@ -167,14 +167,14 @@ elif role == "Client":
 # Manager Section
 # ------------------------------
 elif role == "Manager":
-    st.header("🧑‍💼 Manager Review Section")
+    st.header("Manager Review Section")
     all_res = index.query(vector=random_vector(), top_k=100, include_metadata=True)
     companies = list(set([m.metadata.get("company","?") for m in all_res.matches])) if all_res.matches else []
 
     if companies:
         company = st.selectbox("🏢 Select Company", companies)
     else:
-        st.warning("⚠️ No companies found.")
+        st.warning("No companies found.")
         company = None
 
     if company:
@@ -188,23 +188,23 @@ elif role == "Manager":
 
         pending_tasks = res.matches or []
         if pending_tasks:
-            st.subheader(f"📌 Pending Tasks for {company}")
+            st.subheader(f"Pending Tasks for {company}")
 
             # Auto-assign & clustering
             employees = list(set([m.metadata.get("employee","?") for m in pending_tasks]))
-            if st.button("🔄 Auto-Assign Tasks"):
+            if st.button("Auto-Assign Tasks"):
                 assigned_tasks = assign_task_auto([m.metadata for m in pending_tasks], employees)
                 for i, match in enumerate(pending_tasks):
                     match.metadata['assigned_to'] = assigned_tasks[i]['assigned_to']
-                st.success("✅ Tasks auto-assigned based on workload")
+                st.success("Tasks auto-assigned based on workload")
 
             tasks_metadata = [m.metadata for m in pending_tasks]
             clustered_tasks = cluster_tasks(tasks_metadata)
-            st.subheader("📌 Task Clusters")
+            st.subheader("Task Clusters")
             for t in clustered_tasks:
                 st.write(f"{t.get('task','?')} → Cluster {t.get('cluster','?')} | Completion: {t.get('completion',0)}%")
 
-            st.subheader("📊 Employee Performance")
+            st.subheader("Employee Performance")
             perf = classify_performance([m.metadata for m in pending_tasks])
             for emp, cat in perf.items():
                 st.write(f"{emp} → {cat} Performer")
@@ -216,18 +216,18 @@ elif role == "Manager":
                     emp = md.get("employee", "?")
                     task = md.get("task", "?")
                     emp_completion = float(md.get("completion", 0))
-                    st.write(f"👤 {emp} | Task: **{task}**")
+                    st.write(f" {emp} | Task: **{task}**")
                     st.slider(
-                        f"✅ Adjust Completion ({emp} - {task})",
+                        f" Adjust Completion ({emp} - {task})",
                         0, 100, int(emp_completion),
                         key=f"adj_{match.id}"
                     )
                     st.text_area(
-                        f"📝 Manager Comments ({emp} - {task})",
+                        f" Manager Comments ({emp} - {task})",
                         key=f"c_{match.id}"
                     )
 
-                submit = st.form_submit_button("💾 Save All Reviews")
+                submit = st.form_submit_button(" Save All Reviews")
                 if submit:
                     for match in pending_tasks:
                         md = match.metadata or {}
