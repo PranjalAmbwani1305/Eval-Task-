@@ -3,11 +3,6 @@ from pinecone import Pinecone, ServerlessSpec
 import numpy as np
 import uuid
 from sklearn.linear_model import LinearRegression, LogisticRegression
-from sklearn.feature_extraction.text import CountVectorizerimport streamlit as st
-from pinecone import Pinecone, ServerlessSpec
-import numpy as np
-import uuid
-from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.svm import SVC
 
