@@ -12,11 +12,9 @@ from sklearn.cluster import KMeans
 # Step 1: Initialize Pinecone
 # ------------------------------------------------------
 pc = Pinecone(api_key=st.secrets["PINECONE_API_KEY"])
-
 index_name = "task"
 dimension = 1024
 
-# Create index if missing
 if index_name not in [idx["name"] for idx in pc.list_indexes()]:
     pc.create_index(
         name=index_name,
@@ -28,7 +26,7 @@ if index_name not in [idx["name"] for idx in pc.list_indexes()]:
 index = pc.Index(index_name)
 
 # ------------------------------------------------------
-# Step 2: ML Models
+# Step 2: Machine Learning Models
 # ------------------------------------------------------
 lin_reg = LinearRegression()
 lin_reg.fit([[0], [100]], [0, 5])
@@ -86,9 +84,6 @@ if role == "Manager":
         "July", "August", "September", "October", "November", "December"
     ])
 
-    if "tasks" not in st.session_state:
-        st.session_state["tasks"] = []
-
     with st.form("assign_task_form"):
         task_title = st.text_input("Task Title")
         description = st.text_area("Task Description")
@@ -122,7 +117,6 @@ if role == "Manager":
             else:
                 st.error("Please fill all fields before assigning.")
 
-    # View all tasks
     if st.button("View All Assigned Tasks"):
         res = index.query(
             vector=random_vector(),
@@ -130,11 +124,9 @@ if role == "Manager":
             include_metadata=True,
             filter={"company": {"$eq": company}, "month": {"$eq": month}}
         )
-
         if not res.matches:
             st.warning("No tasks found.")
         else:
-            st.subheader(f"All Tasks for {company} ({month})")
             tasks = [m.metadata for m in res.matches]
             clustered = cluster_tasks(tasks)
             for t in clustered:
@@ -151,6 +143,7 @@ elif role == "Team Member":
     company = st.text_input("Company Name")
     employee = st.text_input("Your Name")
 
+    # Load Tasks
     if st.button("Load My Tasks"):
         if not company or not employee:
             st.error("Please enter both company and your name.")
@@ -162,63 +155,79 @@ elif role == "Team Member":
                 include_values=True,
                 filter={"company": {"$eq": company}, "employee": {"$eq": employee}}
             )
-
             if not res.matches:
                 st.warning("No tasks found for this employee.")
             else:
-                # Group by month
-                tasks_by_month = {}
-                for match in res.matches:
-                    md = match.metadata or {}
-                    m = md.get("month", "Unknown")
-                    tasks_by_month.setdefault(m, []).append((match.id, md, match.values))
+                st.session_state["tasks_loaded"] = [
+                    (m.id, m.metadata, m.values) for m in res.matches
+                ]
 
-                months = sorted(tasks_by_month.keys())
-                month_selected = st.selectbox("Select Month", months)
+    # Display tasks
+    if "tasks_loaded" in st.session_state:
+        tasks = st.session_state["tasks_loaded"]
 
-                if month_selected:
-                    st.subheader(f"Your Tasks for {month_selected}")
+        # Group by month
+        tasks_by_month = {}
+        for match_id, md, match_values in tasks:
+            m = md.get("month", "Unknown")
+            tasks_by_month.setdefault(m, []).append((match_id, md, match_values))
 
-                    for match_id, md, match_values in tasks_by_month[month_selected]:
-                        task = md.get("task", "?")
-                        desc = md.get("description", "No description")
-                        deadline = md.get("deadline", "N/A")
-                        completion = float(md.get("completion", 0))
-                        status = md.get("status", "Assigned")
+        months = sorted(tasks_by_month.keys())
+        month_selected = st.selectbox("Select Month", months)
 
-                        st.markdown(f"**Task:** {task}")
-                        st.markdown(f"**Description:** {desc}")
-                        st.markdown(f"**Deadline:** {deadline}")
-                        st.markdown(f"**Status:** {status}")
-                        st.markdown(f"**Completion:** {completion}%")
+        if month_selected:
+            st.subheader(f"Your Tasks for {month_selected}")
 
-                        new_completion = st.slider(
-                            f"Update Completion for {task}",
-                            0, 100, int(completion),
-                            key=f"comp_{match_id}"
-                        )
+            for match_id, md, match_values in tasks_by_month[month_selected]:
+                task = md.get("task", "?")
+                desc = md.get("description", "No description")
+                deadline = md.get("deadline", "N/A")
+                completion = float(md.get("completion", 0))
+                status = md.get("status", "Assigned")
 
-                        if st.button(f"Submit Progress ({task})", key=f"submit_{match_id}"):
-                            marks = float(lin_reg.predict([[new_completion]])[0])
-                            status_pred = log_reg.predict([[new_completion]])[0]
-                            status_text = "On Track" if status_pred == 1 else "Delayed"
+                st.markdown(f"**Task:** {task}")
+                st.markdown(f"**Description:** {desc}")
+                st.markdown(f"**Deadline:** {deadline}")
+                st.markdown(f"**Status:** {status}")
 
-                            updated_md = safe_metadata({
-                                **md,
-                                "completion": float(new_completion),
-                                "marks": marks,
-                                "status": status_text,
-                                "reviewed": False,
-                                "submitted_on": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            })
+                # Dynamic progress bar color
+                progress_color = "red" if completion < 50 else ("orange" if completion < 80 else "green")
+                st.progress(completion / 100, text=f"{completion:.0f}% complete")
+                st.markdown(f"<span style='color:{progress_color}; font-weight:bold;'>Completion: {completion:.0f}%</span>", unsafe_allow_html=True)
 
-                            index.upsert(vectors=[{
-                                "id": match_id,
-                                "values": match_values if match_values else random_vector(),
-                                "metadata": updated_md
-                            }])
+                new_completion = st.slider(
+                    f"Update Completion for {task}",
+                    0, 100, int(completion),
+                    key=f"comp_{match_id}"
+                )
 
-                            st.success(f"Progress for '{task}' updated successfully on {updated_md['submitted_on']}.")
+                if st.button(f"Submit Progress ({task})", key=f"submit_{match_id}"):
+                    marks = float(lin_reg.predict([[new_completion]])[0])
+                    status_pred = log_reg.predict([[new_completion]])[0]
+                    status_text = "On Track" if status_pred == 1 else "Delayed"
+
+                    updated_md = safe_metadata({
+                        **md,
+                        "completion": float(new_completion),
+                        "marks": marks,
+                        "status": status_text,
+                        "reviewed": False,
+                        "submitted_on": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    })
+
+                    index.upsert(vectors=[{
+                        "id": match_id,
+                        "values": match_values if match_values else random_vector(),
+                        "metadata": updated_md
+                    }])
+
+                    # Update local session state immediately
+                    for i, (tid, old_md, vals) in enumerate(st.session_state["tasks_loaded"]):
+                        if tid == match_id:
+                            st.session_state["tasks_loaded"][i] = (tid, updated_md, vals)
+                            break
+
+                    st.success(f"Progress for '{task}' updated successfully at {updated_md['submitted_on']}.")
 
 # ------------------------------------------------------
 # CLIENT SECTION
