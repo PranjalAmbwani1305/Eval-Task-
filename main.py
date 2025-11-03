@@ -92,13 +92,12 @@ def classify_performance(tasks):
             classification[emp] = "Low"
     return classification
 
-
 # ------------------------------
 # Step 4: Streamlit App
 # ------------------------------
-st.title("AI-Powered Task Completion & Review")
+st.title("AI-Powered Task Completion & Review System")
 
-role = st.sidebar.selectbox("Login as", ["Team Member", "Manager", "Client"])
+role = st.sidebar.selectbox("Login as", ["Team Member", "Manager", "Client", "Admin / Debug"])
 
 # ------------------------------
 # Team Member Section
@@ -132,15 +131,15 @@ if role == "Team Member":
                     })
                 }]
             )
-            st.success(f"Task '{task}' submitted by {employee}")
+            st.success(f" Task '{task}' submitted by {employee}")
         else:
-            st.error("Fill all fields before submitting")
+            st.error(" Fill all fields before submitting")
 
 # ------------------------------
 # Client Section
 # ------------------------------
 elif role == "Client":
-    st.header("Client Section")
+    st.header(" Client Section")
     company = st.text_input("Company Name")
     if st.button("View Approved Tasks") and company:
         res = index.query(
@@ -150,7 +149,7 @@ elif role == "Client":
             filter={"company": {"$eq": company}, "reviewed": {"$eq": True}}
         )
         if res.matches:
-            st.subheader(f" Approved Tasks for {company}")
+            st.subheader(f"Approved Tasks for {company}")
             for match in res.matches:
                 md = match.metadata or {}
                 st.write(
@@ -161,7 +160,7 @@ elif role == "Client":
         else:
             st.warning("No approved tasks found.")
     elif not company:
-        st.error("❌ Enter company name")
+        st.error(" Enter company name")
 
 # ------------------------------
 # Manager Section
@@ -172,7 +171,7 @@ elif role == "Manager":
     companies = list(set([m.metadata.get("company","?") for m in all_res.matches])) if all_res.matches else []
 
     if companies:
-        company = st.selectbox("🏢 Select Company", companies)
+        company = st.selectbox("Select Company", companies)
     else:
         st.warning("No companies found.")
         company = None
@@ -209,25 +208,24 @@ elif role == "Manager":
             for emp, cat in perf.items():
                 st.write(f"{emp} → {cat} Performer")
 
-            # Form to prevent refresh
             with st.form(key="manager_review_form"):
                 for match in pending_tasks:
                     md = match.metadata or {}
                     emp = md.get("employee", "?")
                     task = md.get("task", "?")
                     emp_completion = float(md.get("completion", 0))
-                    st.write(f" {emp} | Task: **{task}**")
+                    st.write(f"{emp} | Task: **{task}**")
                     st.slider(
-                        f" Adjust Completion ({emp} - {task})",
+                        f"Adjust Completion ({emp} - {task})",
                         0, 100, int(emp_completion),
                         key=f"adj_{match.id}"
                     )
                     st.text_area(
-                        f" Manager Comments ({emp} - {task})",
+                        f"Manager Comments ({emp} - {task})",
                         key=f"c_{match.id}"
                     )
 
-                submit = st.form_submit_button(" Save All Reviews")
+                submit = st.form_submit_button("Save All Reviews")
                 if submit:
                     for match in pending_tasks:
                         md = match.metadata or {}
@@ -246,7 +244,6 @@ elif role == "Manager":
                             except Exception:
                                 sentiment_text = "N/A"
 
-                        # Update Pinecone
                         index.upsert(vectors=[{
                             "id": match.id,
                             "values": match.values if hasattr(match, "values") else random_vector(),
@@ -260,6 +257,45 @@ elif role == "Manager":
                                 "sentiment": sentiment_text
                             })
                         }])
-                    st.success("✅ All reviews saved successfully!")
+                    st.success("All reviews saved successfully!")
         else:
-            st.success(f"✅ All tasks for {company} have already been reviewed!")
+            st.success(f"All tasks for {company} have already been reviewed!")
+
+# ------------------------------
+# Admin / Debug Section
+# ------------------------------
+elif role == "Admin / Debug":
+    st.header("Pinecone Data Viewer / Debug Mode")
+
+    if st.button("List All Indexes"):
+        st.write(pc.list_indexes())
+
+    st.subheader("Query Pinecone Records")
+    company_filter = st.text_input("Filter by Company (optional)")
+    reviewed_filter = st.selectbox("Filter by Reviewed Status", ["All", "True", "False"])
+
+    filter_dict = {}
+    if company_filter:
+        filter_dict["company"] = {"$eq": company_filter}
+    if reviewed_filter != "All":
+        filter_dict["reviewed"] = {"$eq": reviewed_filter == "True"}
+
+    if st.button("Query Pinecone"):
+        query_vector = random_vector()
+        res = index.query(
+            vector=query_vector,
+            top_k=50,
+            include_metadata=True,
+            filter=filter_dict if filter_dict else None
+        )
+        if res.matches:
+            st.success(f"Found {len(res.matches)} records")
+            for match in res.matches:
+                st.write(f"**ID:** {match.id}")
+                st.json(match.metadata)
+        else:
+            st.warning("No records found for given filters.")
+
+    if st.button("Show Index Stats"):
+        stats = index.describe_index_stats()
+        st.json(stats)
