@@ -136,31 +136,46 @@ if role == "Team Member":
             st.error(" Fill all fields before submitting")
 
 # ------------------------------
-# Client Section
+# Client Section (Updated)
 # ------------------------------
 elif role == "Client":
-    st.header(" Client Section")
+    st.header("Client Section")
     company = st.text_input("Company Name")
-    if st.button("View Approved Tasks") and company:
+
+    if st.button("View All Tasks") and company:
         res = index.query(
             vector=random_vector(),
-            top_k=100,
+            top_k=200,
             include_metadata=True,
-            filter={"company": {"$eq": company}, "reviewed": {"$eq": True}}
+            filter={"company": {"$eq": company}}
         )
+
         if res.matches:
-            st.subheader(f"Approved Tasks for {company}")
+            st.subheader(f"All Tasks for {company}")
             for match in res.matches:
                 md = match.metadata or {}
-                st.write(
-                    f"{md.get('employee','?')} | **{md.get('task','?')}** → {md.get('completion',0)}% "
-                    f"(Marks: {md.get('marks',0):.2f}) | Status: {md.get('status','?')}"
-                )
-                st.write(f"Manager Sentiment: {md.get('sentiment','N/A')}")
+                reviewed = md.get("reviewed", False)
+                employee = md.get("employee", "?")
+                task = md.get("task", "?")
+                completion = md.get("completion", 0)
+                marks = md.get("marks", 0)
+                status = md.get("status", "Unknown")
+                sentiment = md.get("sentiment", "N/A")
+
+                if reviewed:
+                    st.success(
+                        f"{employee} | Task: **{task}** → {completion}% "
+                        f"(Marks: {marks:.2f}) | Status: {status} | Sentiment: {sentiment}"
+                    )
+                else:
+                    st.warning(
+                        f"{employee} | Task: **{task}** → {completion}% "
+                        f"(Marks: {marks:.2f}) | Status: Pending Manager Review"
+                    )
         else:
-            st.warning("No approved tasks found.")
+            st.warning("No tasks found for this company.")
     elif not company:
-        st.error(" Enter company name")
+        st.error("Enter company name")
 
 # ------------------------------
 # Manager Section
