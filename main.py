@@ -13,7 +13,7 @@ st.title("AI Task Management System")
 # --- Pinecone setup ---
 API_KEY = st.secrets["PINECONE_API_KEY"]
 INDEX_NAME = "task"
-DIM = 128
+DIM = 1024
 
 pc = Pinecone(api_key=API_KEY)
 if INDEX_NAME not in [i["name"] for i in pc.list_indexes()]:
