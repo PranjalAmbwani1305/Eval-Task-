@@ -3,5 +3,16 @@ pandas
 numpy
 scikit-learn
 joblib
+scipy
 pinecone
 plotly
+matplotlib
+seaborn
+transformers
+huggingface_hub
+yellowbrick
+umap-learn
+tqdm
+python-dateutil
+requests
+uuid
