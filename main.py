@@ -7,308 +7,416 @@ from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.svm import SVC
 from sklearn.cluster import KMeans
+import pandas as pd
+import io
+import plotly.express as px
 
-# ------------------------------
-# Configuration / Init
-# ------------------------------
+# ---------------------------
+# Config / Init
+# ---------------------------
 st.set_page_config(page_title="Task Completion & Review", layout="wide")
+st.title("AI-Powered Task Completion & Review System — Extended")
 
+# Pinecone init
 PC_API_KEY = st.secrets["PINECONE_API_KEY"]
 pc = Pinecone(api_key=PC_API_KEY)
 INDEX_NAME = "task"
 DIMENSION = 1024
 
-if INDEX_NAME not in [idx["name"] for idx in pc.list_indexes()]:
+if INDEX_NAME not in [i["name"] for i in pc.list_indexes()]:
     pc.create_index(
         name=INDEX_NAME,
         dimension=DIMENSION,
         metric="cosine",
         spec=ServerlessSpec(cloud="aws", region="us-east-1")
     )
-
 index = pc.Index(INDEX_NAME)
 
-# ------------------------------
-# Simple ML Models (demo)
-# ------------------------------
-lin_reg = LinearRegression()
-lin_reg.fit([[0], [100]], [0, 5])
-
-log_reg = LogisticRegression()
-log_reg.fit([[0], [50], [100]], [0, 0, 1])
-
+# ---------------------------
+# Simple AI components (demo)
+# ---------------------------
+lin_reg = LinearRegression(); lin_reg.fit([[0], [100]], [0, 5])
+log_reg = LogisticRegression(); log_reg.fit([[0], [50], [100]], [0, 0, 1])
 vectorizer = CountVectorizer()
 X_train = vectorizer.fit_transform(["good work", "excellent", "needs improvement", "bad performance"])
 y_train = [1, 1, 0, 0]
-svm_clf = SVC()
-svm_clf.fit(X_train, y_train)
+svm_clf = SVC(); svm_clf.fit(X_train, y_train)
 
-# ------------------------------
+# ---------------------------
 # Helpers
-# ------------------------------
+# ---------------------------
+def now_ts():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
 def random_vector(dim=DIMENSION):
     return np.random.rand(dim).tolist()
 
 def safe_metadata(md: dict):
+    """Sanitize metadata to be Pinecone-safe (no None, no numpy types, dates -> iso)."""
     clean = {}
     for k, v in md.items():
-        # convert numpy types
-        if isinstance(v, (np.generic,)):
+        if v is None:
+            v = ""
+        elif isinstance(v, (np.generic,)):
             v = v.item()
+        elif isinstance(v, (datetime, date)):
+            v = v.isoformat()
+        elif isinstance(v, (float, int, str, bool)):
+            pass
+        else:
+            v = str(v)
         clean[k] = v
     return clean
 
-def cluster_tasks(tasks, n_clusters=3):
-    if not tasks:
-        return []
-    X = np.array([[t.get("completion", 0), t.get("marks", 0)] for t in tasks])
-    n_clusters = min(n_clusters, len(tasks))
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-    clusters = kmeans.fit_predict(X)
-    for t, c in zip(tasks, clusters):
-        t["cluster"] = int(c)
-    return tasks
+def parse_date_safe(s):
+    """Try to parse an ISO date/time or 'YYYY-MM-DD' string; return datetime or None."""
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s)
+    except Exception:
+        try:
+            return datetime.strptime(s, "%Y-%m-%d")
+        except Exception:
+            return None
 
-def now_ts():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+def task_to_row(md: dict):
+    """Convert metadata dict to flat row for DataFrame/export."""
+    row = md.copy()
+    # ensure certain keys exist
+    for k in ["company","employee","task","month","deadline","completion","marks","status","reviewed","client_reviewed","assigned_on","submitted_on","client_approved_on","manager_comments","client_comments","sentiment"]:
+        row.setdefault(k, "")
+    return row
 
-# ------------------------------
-# UI
-# ------------------------------
-st.title("AI-Powered Task Completion & Review System")
+def compute_perf_category(avg):
+    if avg >= 4:
+        return "High"
+    if avg >= 2.5:
+        return "Medium"
+    return "Low"
 
-role = st.sidebar.selectbox("Login as", ["Manager", "Team Member", "Client"])
+# ---------------------------
+# UI: Role selection
+# ---------------------------
+role = st.sidebar.selectbox("Login as", ["Manager", "Team Member", "Client", "Admin"])
+current_month = datetime.now().strftime("%B %Y")
 
-# ------------------------------
-# MANAGER: Assign & Final Review (only after client approval)
-# ------------------------------
+# ---------------------------
+# Shared: quick function to fetch all metadata (used by dashboard/export)
+# ---------------------------
+def fetch_all_tasks(top_k=1000):
+    res = index.query(vector=random_vector(), top_k=top_k, include_metadata=True)
+    matches = res.matches or []
+    rows = []
+    for m in matches:
+        md = m.metadata or {}
+        md_row = task_to_row(md)
+        md_row["_id"] = m.id
+        rows.append(md_row)
+    if rows:
+        df = pd.DataFrame(rows)
+    else:
+        df = pd.DataFrame(columns=["_id"])
+    return df
+
+# ---------------------------
+# Manager: assign and final review (after client approval)
+# ---------------------------
 if role == "Manager":
-    st.header("Manager: Assign Tasks / Final Review")
-    company = st.text_input("Company Name (for assignment & review)")
+    st.header("Manager — Assign Tasks & Final Review")
 
-    st.subheader("Assign New Task")
-    with st.form("assign_form"):
-        assign_month = st.selectbox(
-            "Month",
-            ["January", "February", "March", "April", "May", "June",
-             "July", "August", "September", "October", "November", "December"]
-        )
-        task_title = st.text_input("Task Title")
-        description = st.text_area("Task Description")
-        deadline = st.date_input("Deadline", value=date.today())
-        assignee = st.text_input("Assign to Employee (exact name)")
-        submit_assign = st.form_submit_button("Assign Task")
-
-        if submit_assign:
-            if not all([company, task_title, assignee]):
-                st.error("Please provide Company Name, Task Title and Employee name.")
-            else:
-                tid = str(uuid.uuid4())
-                metadata = safe_metadata({
-                    "company": company,
-                    "month": assign_month,
-                    "task": task_title,
-                    "description": description,
-                    "deadline": str(deadline),
-                    "employee": assignee,
-                    "completion": 0.0,
-                    "marks": 0.0,
-                    "status": "Assigned",
-                    "reviewed": False,
-                    "client_approved": False,
-                    "assigned_on": now_ts()
-                })
-                index.upsert(vectors=[{"id": tid, "values": random_vector(), "metadata": metadata}])
-                st.success(f"Assigned '{task_title}' to {assignee} for {assign_month}.")
-
-    st.markdown("---")
-    st.subheader("Final Review (only tasks approved by client)")
-
-    if st.button("Load Client-Approved Tasks for Review"):
-        if not company:
-            st.error("Provide Company Name to load tasks.")
-        else:
-            res = index.query(
-                vector=random_vector(),
-                top_k=500,
-                include_metadata=True,
-                include_values=True,
-                filter={"company": {"$eq": company}, "client_approved": {"$eq": True}, "reviewed": {"$eq": False}}
-            )
-            st.session_state["manager_review"] = res.matches if res.matches else []
-            st.write(f"Loaded {len(st.session_state.get('manager_review', []))} tasks awaiting final review.")
-
-    if st.session_state.get("manager_review"):
-        tasks_meta = [m.metadata for m in st.session_state["manager_review"]]
-        clustered = cluster_tasks(tasks_meta)
-        st.write("Clusters (based on completion & marks):")
-        for t in clustered:
-            st.write(f"{t.get('task')} | Employee: {t.get('employee')} | Completion: {t.get('completion')}% | Cluster: {t.get('cluster')}")
-
-        for match in st.session_state["manager_review"]:
-            md = match.metadata or {}
-            st.markdown("### " + md.get("task", "?"))
-            st.write(f"Employee: {md.get('employee','?')}")
-            st.write(f"Completion: {md.get('completion',0)}% | Current status: {md.get('status','?')}")
-            st.write(f"Submitted on: {md.get('submitted_on','N/A')}")
-            final_marks = st.number_input(f"Final Marks for {md.get('task','?')} (0-5)", min_value=0.0, max_value=5.0, step=0.1, key=f"fm_{match.id}")
-            final_comments = st.text_area(f"Final Comments for {md.get('task','?')}", key=f"fc_{match.id}")
-            approve = st.button(f"Complete Review & Approve ({md.get('task','?')})", key=f"approve_{match.id}")
-            if approve:
-                # compute final status from completion if needed
-                final_status = md.get("status", "Unknown")
-                updated_md = safe_metadata({
-                    **md,
-                    "marks": float(final_marks),
-                    "status": final_status,
-                    "reviewed": True,
-                    "reviewed_on": now_ts(),
-                    "manager_comments": final_comments
-                })
-                values_to_use = match.values if hasattr(match, "values") and match.values else random_vector()
-                index.upsert(vectors=[{"id": match.id, "values": values_to_use, "metadata": updated_md}])
-                st.success(f"Task '{md.get('task')}' reviewed and marked complete.")
-                # remove from session_state list
-                st.session_state["manager_review"] = [m for m in st.session_state["manager_review"] if m.id != match.id]
-
-# ------------------------------
-# TEAM MEMBER: Load assigned tasks & submit progress
-# ------------------------------
-elif role == "Team Member":
-    st.header("Team Member: View & Update Assigned Tasks")
-    company = st.text_input("Company Name")
-    employee = st.text_input("Your Name (exact)")
-
-    if st.button("Load My Tasks"):
-        if not company or not employee:
-            st.error("Enter both Company and Your Name.")
-        else:
-            res = index.query(
-                vector=random_vector(),
-                top_k=500,
-                include_metadata=True,
-                include_values=True,
-                filter={"company": {"$eq": company}, "employee": {"$eq": employee}}
-            )
-            st.session_state["tasks_loaded"] = [(m.id, m.metadata, m.values) for m in res.matches] if res.matches else []
-            st.write(f"Loaded {len(st.session_state.get('tasks_loaded', []))} tasks.")
-
-    if st.session_state.get("tasks_loaded"):
-        tasks = st.session_state["tasks_loaded"]
-        # group by month
-        tasks_by_month = {}
-        for tid, md, vals in tasks:
-            month = md.get("month", "Unknown")
-            tasks_by_month.setdefault(month, []).append((tid, md, vals))
-
-        months = sorted(tasks_by_month.keys())
-        month_selected = st.selectbox("Select Month", months)
-
-        if month_selected:
-            entries = tasks_by_month.get(month_selected, [])
-            if not entries:
-                st.info("No tasks for this month.")
-            for tid, md, vals in entries:
-                st.markdown("### " + md.get("task", "?"))
-                st.write(f"Description: {md.get('description','No description')}")
-                st.write(f"Deadline: {md.get('deadline','N/A')}")
-                completion = float(md.get("completion", 0))
-                # progress bar with color indicator (textual color since st.progress doesn't support color)
-                if completion < 50:
-                    color_label = "Low"
-                elif completion < 80:
-                    color_label = "Moderate"
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        st.subheader("Assign New Task")
+        with st.form("assign_form"):
+            company = st.text_input("Company Name")
+            employee = st.text_input("Employee Name")
+            task_title = st.text_input("Task Title")
+            description = st.text_area("Task Description")
+            deadline = st.date_input("Deadline", value=date.today())
+            month = st.selectbox("Month", [current_month])
+            submit_assign = st.form_submit_button("Assign Task")
+            if submit_assign:
+                if not (company and employee and task_title):
+                    st.error("Please fill Company, Employee, and Task Title.")
                 else:
-                    color_label = "Good"
-                st.progress(min(max(completion/100.0, 0.0), 1.0))
-                st.write(f"Completion: {completion}% ({color_label})")
-                new_completion = st.slider(f"Update completion for '{md.get('task')}'", 0, 100, int(completion), key=f"slider_{tid}")
+                    tid = str(uuid.uuid4())
+                    md = safe_metadata({
+                        "company": company,
+                        "employee": employee,
+                        "task": task_title,
+                        "description": description,
+                        "deadline": deadline.isoformat(),
+                        "month": month,
+                        "completion": 0.0,
+                        "marks": 0.0,
+                        "status": "Assigned",
+                        "reviewed": False,
+                        "client_reviewed": False,
+                        "assigned_on": now_ts(),
+                        "notifications": ""  # placeholder for notifications log
+                    })
+                    values = random_vector()
+                    try:
+                        index.upsert([{"id": tid, "values": values, "metadata": md}])
+                        st.success(f"Assigned {task_title} to {employee}.")
+                        # simulate notification by adding a notifications field with timestamp
+                        notif = f"assigned:{now_ts()}"
+                        md2 = safe_metadata({**md, "notifications": notif})
+                        index.upsert([{"id": tid, "values": values, "metadata": md2}])
+                    except Exception as e:
+                        st.error("Failed to assign task — check logs.")
+                        st.exception(e)
 
-                submit_key = f"submit_{tid}"
-                if st.button(f"Submit Progress ({md.get('task')})", key=submit_key):
-                    marks = float(lin_reg.predict([[new_completion]])[0])
-                    status_pred = log_reg.predict([[new_completion]])[0]
-                    status_text = "On Track" if status_pred == 1 else "Delayed"
+    with col2:
+        st.subheader("Load Client-Approved Tasks for Final Review")
+        company_review = st.text_input("Company (for review)", key="mgr_company_review")
+        if st.button("Load client-approved tasks"):
+            if not company_review:
+                st.error("Provide company name.")
+            else:
+                res = index.query(
+                    vector=random_vector(),
+                    top_k=500,
+                    include_metadata=True,
+                    include_values=True,
+                    filter={"company": {"$eq": company_review}, "client_reviewed": {"$eq": True}, "reviewed": {"$eq": False}}
+                )
+                matches = res.matches or []
+                st.session_state["mgr_review_matches"] = matches
+                st.info(f"Loaded {len(matches)} tasks awaiting final review.")
+
+        matches = st.session_state.get("mgr_review_matches", [])
+        if matches:
+            for m in matches:
+                md = m.metadata or {}
+                st.markdown(f"### {md.get('task','?')}")
+                st.write(f"Employee: {md.get('employee','?')}")
+                st.write(f"Client comments: {md.get('client_comments','')}")
+                st.write(f"Submitted on: {md.get('submitted_on','')}")
+                completion_val = float(md.get("completion", 0) or 0)
+                final_marks = st.number_input(f"Final marks (0-5) for {md.get('task')}", min_value=0.0, max_value=5.0, step=0.1, key=f"fm_{m.id}")
+                final_comments = st.text_area(f"Manager comments for {md.get('task')}", key=f"mc_{m.id}")
+                if st.button(f"Finalize Review: {md.get('task')}", key=f"final_{m.id}"):
                     updated_md = safe_metadata({
                         **md,
-                        "completion": float(new_completion),
-                        "marks": marks,
-                        "status": status_text,
-                        "reviewed": False,
-                        "submitted_on": now_ts(),
-                        # client approval reset (client must approve after team update)
-                        "client_approved": False,
-                        "client_approved_on": None
+                        "marks": float(final_marks),
+                        "status": md.get("status", "Completed"),
+                        "reviewed": True,
+                        "manager_comments": final_comments,
+                        "reviewed_on": now_ts()
                     })
-                    values_to_use = vals if vals else random_vector()
-                    index.upsert(vectors=[{"id": tid, "values": values_to_use, "metadata": updated_md}])
-                    # update session state entry
-                    for i, (xid, xmd, xvals) in enumerate(st.session_state["tasks_loaded"]):
-                        if xid == tid:
-                            st.session_state["tasks_loaded"][i] = (xid, updated_md, xvals)
-                            break
-                    st.success(f"Progress submitted at {updated_md['submitted_on']}")
+                    values_to_use = m.values if hasattr(m, "values") and m.values and len(m.values) == DIMENSION else random_vector()
+                    try:
+                        index.upsert([{"id": m.id, "values": values_to_use, "metadata": updated_md}])
+                        st.success(f"Finalized review for {md.get('task')}.")
+                        # optionally remove from session list
+                        st.session_state["mgr_review_matches"] = [mm for mm in st.session_state["mgr_review_matches"] if mm.id != m.id]
+                    except Exception as e:
+                        st.error("Failed to finalize review.")
+                        st.exception(e)
 
-# ------------------------------
-# CLIENT: View tasks & approve after verifying
-# ------------------------------
-elif role == "Client":
-    st.header("Client: View & Approve Tasks")
+    st.markdown("---")
+    st.subheader("Manager Filters & Search")
+    df_all = fetch_all_tasks()
+    if not df_all.empty:
+        q_company = st.text_input("Filter company (optional)", key="mgr_search_company")
+        q_employee = st.text_input("Filter employee (optional)", key="mgr_search_employee")
+        q_status = st.selectbox("Filter status", ["All", "Assigned", "On Track", "Delayed", "Completed"], index=0)
+        filtered = df_all.copy()
+        if q_company:
+            filtered = filtered[filtered["company"].str.contains(q_company, case=False, na=False)]
+        if q_employee:
+            filtered = filtered[filtered["employee"].str.contains(q_employee, case=False, na=False)]
+        if q_status != "All":
+            filtered = filtered[filtered[filtered["status"].str.contains(q_status, na=False)]]
+        st.dataframe(filtered)
+
+        # Export
+        buf = io.BytesIO()
+        csv = filtered.to_csv(index=False)
+        st.download_button("Download filtered CSV", csv, file_name="tasks_filtered.csv", mime="text/csv")
+
+# ---------------------------
+# Team Member: update progress (persistent, auto reload)
+# ---------------------------
+elif role == "Team Member":
+    st.header("Team Member — Load & Submit Progress")
     company = st.text_input("Company Name")
+    employee = st.text_input("Your Name (exact)")
+    month_input = st.text_input("Month (e.g., 'November 2025')", value=current_month)
 
-    if st.button("Load Company Tasks"):
-        if not company:
-            st.error("Enter company name.")
+    if st.button("Load My Tasks"):
+        if not (company and employee):
+            st.error("Enter company and employee name.")
         else:
             res = index.query(
                 vector=random_vector(),
-                top_k=800,
+                top_k=500,
                 include_metadata=True,
                 include_values=True,
-                filter={"company": {"$eq": company}}
+                filter={"company": {"$eq": company}, "employee": {"$eq": employee}, "month": {"$eq": month_input}}
             )
-            st.session_state["client_tasks"] = [(m.id, m.metadata, m.values) for m in res.matches] if res.matches else []
-            st.write(f"Loaded {len(st.session_state.get('client_tasks', []))} tasks for {company}.")
+            st.session_state["tm_tasks"] = [(m.id, m.metadata, m.values) for m in (res.matches or [])]
+            st.success(f"Loaded {len(st.session_state.get('tm_tasks', []))} tasks.")
 
-    if st.session_state.get("client_tasks"):
-        tasks = st.session_state["client_tasks"]
-        # group by month
-        tasks_by_month = {}
-        for tid, md, vals in tasks:
-            month = md.get("month", "Unknown")
-            tasks_by_month.setdefault(month, []).append((tid, md, vals))
-
-        months = sorted(tasks_by_month.keys())
-        month_selected = st.selectbox("Select Month", months, key="client_month")
-
-        if month_selected:
-            entries = tasks_by_month.get(month_selected, [])
-            if not entries:
-                st.info("No tasks for this month.")
-            for tid, md, vals in entries:
-                st.markdown("### " + md.get("task", "?"))
-                st.write(f"Employee: {md.get('employee','?')}")
-                st.write(f"Completion: {md.get('completion',0)}%")
-                st.write(f"Submitted on: {md.get('submitted_on','N/A')}")
-                st.write(f"Client Approved: {md.get('client_approved', False)}")
-                if not md.get("client_approved", False):
-                    if st.button(f"Approve Task ({md.get('task')})", key=f"client_approve_{tid}"):
-                        updated_md = safe_metadata({
-                            **md,
-                            "client_approved": True,
-                            "client_approved_on": now_ts()
-                        })
-                        values_to_use = vals if vals else random_vector()
-                        index.upsert(vectors=[{"id": tid, "values": values_to_use, "metadata": updated_md}])
-                        # update session_state
-                        for i, (xid, xmd, xvals) in enumerate(st.session_state["client_tasks"]):
-                            if xid == tid:
-                                st.session_state["client_tasks"][i] = (xid, updated_md, xvals)
-                                break
-                        st.success(f"Task '{md.get('task')}' approved by client at {updated_md['client_approved_on']}.")
+    tm_tasks = st.session_state.get("tm_tasks", [])
+    if tm_tasks:
+        for tid, md, vals in tm_tasks:
+            st.markdown(f"### {md.get('task','?')}")
+            st.write(md.get("description", ""))
+            dead = md.get("deadline", "")
+            deadline_dt = parse_date_safe(dead)
+            overdue = False
+            if deadline_dt:
+                if datetime.now() > deadline_dt:
+                    overdue = True
+                    st.warning(f"Deadline passed: {deadline_dt.date()}")
                 else:
-                    st.write(f"Approved on: {md.get('client_approved_on', 'N/A')}")
+                    st.write(f"Deadline: {deadline_dt.date()}")
 
-# ------------------------------
-# End
-# ------------------------------
+            completion_current = float(md.get("completion", 0) or 0)
+            st.write(f"Current completion: {completion_current}%")
+            new_completion = st.slider(f"Update completion for {md.get('task')}", 0, 100, int(completion_current), key=f"tm_{tid}")
+
+            if st.button(f"Submit Progress for {md.get('task')}", key=f"tm_submit_{tid}"):
+                marks = float(lin_reg.predict([[new_completion]])[0])
+                status_pred = log_reg.predict([[new_completion]])[0]
+                status_txt = "On Track" if status_pred == 1 else "Delayed"
+                updated_md = safe_metadata({
+                    **md,
+                    "completion": float(new_completion),
+                    "marks": float(marks),
+                    "status": status_txt,
+                    "submitted_on": now_ts(),
+                    # reset client_reviewed since team changed progress
+                    "client_reviewed": False,
+                    "client_comments": ""
+                })
+                values_to_use = vals if vals and len(vals) == DIMENSION else random_vector()
+                try:
+                    index.upsert([{"id": tid, "values": values_to_use, "metadata": updated_md}])
+                    st.success(f"Submitted progress for {md.get('task')} at {updated_md['submitted_on']}")
+                    # update session_state
+                    for i, (xid, xmd, xvals) in enumerate(st.session_state["tm_tasks"]):
+                        if xid == tid:
+                            st.session_state["tm_tasks"][i] = (xid, updated_md, xvals)
+                            break
+                except Exception as e:
+                    st.error("Failed to submit progress.")
+                    st.exception(e)
+
+# ---------------------------
+# Client: view completed tasks & approve (client_approved -> manager sees)
+# ---------------------------
+elif role == "Client":
+    st.header("Client — Review & Approve Completed Tasks")
+    company = st.text_input("Company Name (for client review)")
+    if st.button("Load Completed Tasks"):
+        if not company:
+            st.error("Provide company name.")
+        else:
+            res = index.query(
+                vector=random_vector(),
+                top_k=500,
+                include_metadata=True,
+                include_values=True,
+                filter={"company": {"$eq": company}, "completion": {"$gte": 99}, "client_reviewed": {"$eq": False}}
+            )
+            st.session_state["client_tasks"] = [(m.id, m.metadata, m.values) for m in (res.matches or [])]
+            st.success(f"Loaded {len(st.session_state.get('client_tasks', []))} completed tasks.")
+
+    client_tasks = st.session_state.get("client_tasks", [])
+    if client_tasks:
+        for tid, md, vals in client_tasks:
+            st.markdown(f"### {md.get('task','?')}")
+            st.write(f"Employee: {md.get('employee','?')}")
+            st.write(f"Completion: {md.get('completion',0)}%")
+            st.write(f"Submitted on: {md.get('submitted_on','N/A')}")
+            client_comments = st.text_area(f"Your feedback for {md.get('task')}", key=f"cc_{tid}")
+            if st.button(f"Client Approve {md.get('task')}", key=f"capprove_{tid}"):
+                updated_md = safe_metadata({**md, "client_reviewed": True, "client_comments": client_comments, "client_approved_on": now_ts()})
+                values_to_use = vals if vals and len(vals) == DIMENSION else random_vector()
+                try:
+                    index.upsert([{"id": tid, "values": values_to_use, "metadata": updated_md}])
+                    st.success(f"Task {md.get('task')} approved and flagged for manager review.")
+                    # update session_state copy
+                    for i, (xid, xmd, xvals) in enumerate(st.session_state["client_tasks"]):
+                        if xid == tid:
+                            st.session_state["client_tasks"][i] = (xid, updated_md, xvals)
+                            break
+                except Exception as e:
+                    st.error("Failed to record client approval.")
+                    st.exception(e)
+
+# ---------------------------
+# Admin: overview, export, summary generator
+# ---------------------------
+elif role == "Admin":
+    st.header("Admin Overview & Exports")
+
+    df = fetch_all_tasks(top_k=1000)
+    if df.empty:
+        st.warning("No tasks in index yet.")
+    else:
+        st.subheader("Global Filters")
+        colA, colB, colC = st.columns(3)
+        with colA:
+            filt_company = st.selectbox("Company (All)", ["All"] + sorted(df["company"].dropna().unique().tolist()))
+        with colB:
+            filt_employee = st.text_input("Employee filter (substring)")
+        with colC:
+            filt_month = st.selectbox("Month (All)", ["All"] + sorted(df["month"].dropna().unique().tolist()))
+
+        filtered = df.copy()
+        if filt_company and filt_company != "All":
+            filtered = filtered[filtered["company"] == filt_company]
+        if filt_employee:
+            filtered = filtered[filtered[filtered["employee"].str.contains(filt_employee, case=False, na=False)]]
+        if filt_month and filt_month != "All":
+            filtered = filtered[filtered["month"] == filt_month]
+
+        st.subheader("Summary KPIs")
+        total_tasks = len(filtered)
+        avg_completion = filtered["completion"].astype(float).mean() if not filtered.empty else 0
+        avg_marks = filtered["marks"].astype(float).mean() if not filtered.empty else 0
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total tasks", total_tasks)
+        col2.metric("Average completion", f"{avg_completion:.1f}%")
+        col3.metric("Average marks", f"{avg_marks:.2f}")
+
+        st.subheader("Employee Performance")
+        perf = filtered.groupby("employee").agg({"marks":"mean","completion":"mean","task":"count"}).reset_index()
+        perf["performance_category"] = perf["marks"].apply(lambda x: compute_perf_category(float(x) if not pd.isna(x) else 0))
+        st.dataframe(perf.sort_values("marks", ascending=False))
+
+        st.subheader("Export Data")
+        csv_bytes = filtered.to_csv(index=False).encode("utf-8")
+        st.download_button("Download CSV", csv_bytes, file_name="tasks_export.csv", mime="text/csv")
+        # excel
+        towrite = io.BytesIO()
+        with pd.ExcelWriter(towrite, engine="xlsxwriter") as writer:
+            filtered.to_excel(writer, sheet_name="tasks", index=False)
+        towrite.seek(0)
+        st.download_button("Download Excel", towrite.read(), file_name="tasks_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+        st.subheader("Cluster Dashboard (quick)")
+        if not filtered.empty:
+            filtered["completion"] = pd.to_numeric(filtered["completion"], errors="coerce")
+            filtered["marks"] = pd.to_numeric(filtered["marks"], errors="coerce")
+            fig = px.bar(filtered.groupby("employee").completion.mean().reset_index(), x="employee", y="completion", title="Avg Completion by Employee")
+            st.plotly_chart(fig, use_container_width=True)
+
+        st.subheader("AI-style Summary Generator")
+        if st.button("Generate Summary for Current Filter"):
+            # simple aggregated summary
+            total = len(filtered)
+            avg_comp = filtered["completion"].astype(float).mean() if not filtered.empty else 0
+            top_emps = filtered.groupby("employee").completion.mean().sort_values(ascending=False).head(3)
+            top_list = ", ".join([f"{idx} ({val:.0f}%)" for idx, val in top_emps.items()]) if not top_emps.empty else "N/A"
+            summary = (
+                f"As of {now_ts()}, there are {total} tasks in the selected filter. "
+                f"The average completion is {avg_comp:.1f}%. Top performers by completion: {top_list}. "
+                f"Average marks: {avg_marks:.2f}."
+            )
+            st.info(summary)
