@@ -11,9 +11,6 @@ from sklearn.svm import SVC
 from sklearn.cluster import KMeans
 import plotly.express as px
 
-# -----------------------------
-# CONFIG
-# -----------------------------
 st.set_page_config(page_title="AI Task System", layout="wide")
 st.title("AI-Powered Task Management System")
 
@@ -22,7 +19,6 @@ pc = Pinecone(api_key=PINECONE_API_KEY)
 INDEX_NAME = "task"
 DIMENSION = 1024
 
-# Create index if needed
 if INDEX_NAME not in [i["name"] for i in pc.list_indexes()]:
     pc.create_index(
         name=INDEX_NAME,
@@ -32,42 +28,14 @@ if INDEX_NAME not in [i["name"] for i in pc.list_indexes()]:
     )
 index = pc.Index(INDEX_NAME)
 
-# -----------------------------
-# HELPERS
-# -----------------------------
 def now(): 
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 def rand_vec(): 
     return np.random.rand(DIMENSION).tolist()
 
-def safe_meta(md):
-    clean = {}
-    for k, v in md.items():
-        if v is None:
-            v = ""
-        elif isinstance(v, (datetime, date)):
-            v = v.isoformat()
-        clean[k] = v
-    return clean
-
-def fetch_all():
-    try:
-        res = index.query(vector=rand_vec(), top_k=1000, include_metadata=True)
-        if not res.matches: 
-            return pd.DataFrame()
-        rows = []
-        for m in res.matches:
-            md = m.metadata or {}
-            md["_id"] = m.id
-            rows.append(md)
-        return pd.DataFrame(rows)
-    except Exception as e:
-        st.error(f"Error fetching from Pinecone: {e}")
-        return pd.DataFrame()
-
 # -----------------------------
-# SIMPLE MODELS
+# AI MODELS
 # -----------------------------
 lin_reg = LinearRegression()
 lin_reg.fit([[0], [50], [100]], [0, 2.5, 5])
@@ -88,7 +56,35 @@ y_rf = [0, 1, 0, 0]
 rf.fit(X_rf, y_rf)
 
 # -----------------------------
-# UI
+# HELPERS
+# -----------------------------
+def safe_meta(md):
+    clean = {}
+    for k, v in md.items():
+        if v is None:
+            v = ""
+        elif isinstance(v, (datetime, date)):
+            v = v.isoformat()
+        clean[k] = v
+    return clean
+
+def fetch_all():
+    try:
+        res = index.query(vector=rand_vec(), top_k=1000, include_metadata=True)
+        if not res.matches:
+            return pd.DataFrame()
+        rows = []
+        for m in res.matches:
+            md = m.metadata or {}
+            md["_id"] = m.id
+            rows.append(md)
+        return pd.DataFrame(rows)
+    except Exception as e:
+        st.error(f"Error fetching from Pinecone: {e}")
+        return pd.DataFrame()
+
+# -----------------------------
+# ROLE SELECTION
 # -----------------------------
 role = st.sidebar.selectbox("Login as", ["Manager", "Team Member", "Client", "Admin"])
 current_month = datetime.now().strftime("%B %Y")
@@ -100,9 +96,8 @@ if role == "Manager":
     st.header("Manager Dashboard")
     tab1, tab2 = st.tabs(["Assign Task", "Review Client-Approved"])
 
-    # ASSIGN
     with tab1:
-        with st.form("assign_task"):
+        with st.form("assign"):
             company = st.text_input("Company Name")
             employee = st.text_input("Employee Name")
             task = st.text_input("Task Title")
@@ -110,7 +105,6 @@ if role == "Manager":
             deadline = st.date_input("Deadline", value=date.today())
             month = st.text_input("Month", value=current_month)
             submit = st.form_submit_button("Assign Task")
-
             if submit and company and employee and task:
                 tid = str(uuid.uuid4())
                 md = safe_meta({
@@ -130,36 +124,43 @@ if role == "Manager":
                 index.upsert([{"id": tid, "values": rand_vec(), "metadata": md}])
                 st.success(f"Task '{task}' assigned to {employee}")
 
-    # REVIEW
     with tab2:
+        st.subheader("Client-Approved Tasks")
         df = fetch_all()
-        if "client_reviewed" in df.columns:
-            df = df[df["client_reviewed"].astype(str).str.lower() == "true"]
+
+        if not df.empty:
+            df["client_reviewed"] = df["client_reviewed"].apply(lambda x: str(x).strip().lower() in ["true", "1", "yes"])
+            df = df[df["client_reviewed"] == True]
         else:
             df = pd.DataFrame()
 
         if df.empty:
-            st.info("No client-approved tasks.")
+            st.info("No client-approved tasks yet.")
         else:
             for _, r in df.iterrows():
-                st.subheader(r["task"])
-                st.write(f"Employee: {r['employee']}")
-                st.write(f"Client Comments: {r.get('client_comments', '')}")
-                marks = st.number_input(f"Marks for {r['task']}", 0.0, 5.0, step=0.1)
-                comments = st.text_area(f"Manager Comments for {r['task']}")
-                if st.button(f"Finalize Review {r['_id']}", key=f"rev_{r['_id']}"):
-                    sent_val = int(svm_clf.predict(vectorizer.transform([comments]))[0])
-                    sent = "Positive" if sent_val == 1 else "Negative"
-                    md = safe_meta({
-                        **r,
-                        "marks": marks,
-                        "manager_comments": comments,
-                        "reviewed": True,
-                        "sentiment": sent,
-                        "reviewed_on": now()
-                    })
-                    index.upsert([{"id": r["_id"], "values": rand_vec(), "metadata": md}])
-                    st.success(f"Review finalized for {r['task']} ({sent})")
+                st.markdown(f"**Task:** {r['task']}")
+                st.write(f"Employee: {r.get('employee', '')}")
+                st.write(f"Client Comments: {r.get('client_comments', 'No comments provided')}")
+                marks = st.number_input(f"Marks for {r['task']}", 0.0, 5.0, float(r.get('marks', 0)), step=0.1, key=f"m_{r['_id']}")
+                comments = st.text_area(f"Manager Comments for {r['task']}", key=f"c_{r['_id']}")
+
+                if st.button(f"Finalize Review {r['task']}", key=f"b_{r['_id']}"):
+                    try:
+                        sent_val = int(svm_clf.predict(vectorizer.transform([comments]))[0])
+                        sent = "Positive" if sent_val == 1 else "Negative"
+                        md = safe_meta({
+                            **r,
+                            "marks": marks,
+                            "manager_comments": comments,
+                            "reviewed": True,
+                            "sentiment": sent,
+                            "reviewed_on": now()
+                        })
+                        index.upsert([{"id": r["_id"], "values": rand_vec(), "metadata": md}])
+                        st.success(f"Review finalized for '{r['task']}' ({sent})")
+                        st.experimental_rerun()
+                    except Exception as e:
+                        st.error(f"Error during review: {e}")
 
 # -----------------------------
 # TEAM MEMBER
@@ -204,8 +205,7 @@ elif role == "Team Member":
 elif role == "Client":
     st.header("Client Review")
     company = st.text_input("Company Name")
-
-    if st.button("Load Completed Tasks"):
+    if st.button("Load Completed"):
         res = index.query(vector=rand_vec(), top_k=500, include_metadata=True,
                           filter={"company": {"$eq": company}, "completion": {"$gte": 95}})
         st.session_state["ctasks"] = [(m.id, m.metadata) for m in res.matches or []]
@@ -220,7 +220,6 @@ elif role == "Client":
             md2 = safe_meta({**md, "client_reviewed": True, "client_comments": comment, "client_approved_on": now()})
             index.upsert([{"id": tid, "values": rand_vec(), "metadata": md2}])
             st.success(f"Approved {md.get('task')}")
-            st.experimental_rerun()  # auto-refresh
 
 # -----------------------------
 # ADMIN
@@ -238,19 +237,19 @@ elif role == "Admin":
         top = df.groupby("employee")["marks"].mean().reset_index().sort_values("marks", ascending=False).head(5)
         st.dataframe(top)
 
-        if len(df) >= 2:
-            st.subheader("K-Means Clustering (Performance)")
-            n_clusters = min(3, len(df))
-            km = KMeans(n_clusters=n_clusters, n_init=10).fit(df[["completion", "marks"]].fillna(0))
+        st.subheader("K-Means Clustering (Performance)")
+        if len(df) >= 3:
+            km = KMeans(n_clusters=3, n_init="auto").fit(df[["completion", "marks"]].fillna(0))
             df["cluster"] = km.labels_
             st.plotly_chart(px.scatter(df, x="completion", y="marks", color=df["cluster"].astype(str),
                                        hover_data=["employee", "task"], title="Employee Task Clusters"))
         else:
-            st.info("Not enough data for clustering.")
+            st.info("Not enough data for clustering (need at least 3 tasks).")
 
         st.subheader("Summary")
         avg_m = df["marks"].mean()
         avg_c = df["completion"].mean()
         summary = f"Average marks: {avg_m:.2f}, completion: {avg_c:.1f}%. Top performers: {', '.join(top['employee'].tolist())}."
         st.info(summary)
+
         st.download_button("Download All Tasks (CSV)", df.to_csv(index=False), "tasks.csv", "text/csv")
