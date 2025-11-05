@@ -16,7 +16,7 @@ st.title("AI-Powered Task Management System")
 
 PINECONE_API_KEY = st.secrets["PINECONE_API_KEY"]
 pc = Pinecone(api_key=PINECONE_API_KEY)
-INDEX_NAME = "task-index"
+INDEX_NAME = "task"
 DIMENSION = 1024
 
 # Create Pinecone index if missing
