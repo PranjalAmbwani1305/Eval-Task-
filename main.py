@@ -14,7 +14,7 @@ pc = pinecone.Pinecone(api_key=st.secrets["PINECONE_API_KEY"])
 index_name = "task-index"
 
 if index_name not in [i.name for i in pc.list_indexes()]:
-    pc.create_index(name=index_name, dimension=128, metric="cosine")
+    pc.create_index(name=index_name, dimension=1024, metric="cosine")
 
 index = pc.Index(index_name)
 
