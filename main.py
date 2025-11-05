@@ -36,17 +36,14 @@ def now(): return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 def rand_vec(): return np.random.rand(DIMENSION).tolist()
 
 # -----------------------------
-# SIMPLE AI MODELS (AUTO-FIT)
+# SIMPLE AI MODELS
 # -----------------------------
-# Linear Regression → Marks
 lin_reg = LinearRegression()
 lin_reg.fit([[0], [50], [100]], [0, 2.5, 5])
 
-# Logistic Regression → On Track / Delayed
 log_reg = LogisticRegression()
 log_reg.fit([[0], [40], [80], [100]], [0, 0, 1, 1])
 
-# SVM → Sentiment of comments
 comments = ["excellent work", "needs improvement", "bad performance", "great job", "average"]
 sentiments = [1, 0, 0, 1, 0]
 vectorizer = CountVectorizer()
@@ -54,10 +51,9 @@ X_train = vectorizer.fit_transform(comments)
 svm_clf = SVC()
 svm_clf.fit(X_train, sentiments)
 
-# Random Forest → Predict if task will meet deadline
 rf = RandomForestClassifier()
-X_rf = np.array([[10, 2], [50, 1], [90, 0], [100, 0]])  # [completion, delayed?]
-y_rf = [0, 1, 0, 0]  # 1 = will miss
+X_rf = np.array([[10, 2], [50, 1], [90, 0], [100, 0]])
+y_rf = [1, 1, 0, 0]
 rf.fit(X_rf, y_rf)
 
 # -----------------------------
@@ -76,7 +72,8 @@ def safe_meta(md):
 def fetch_all():
     try:
         res = index.query(vector=rand_vec(), top_k=1000, include_metadata=True)
-        if not res.matches: return pd.DataFrame()
+        if not res.matches:
+            return pd.DataFrame()
         rows = []
         for m in res.matches:
             md = m.metadata or {}
@@ -94,7 +91,7 @@ role = st.sidebar.selectbox("Login as", ["Manager", "Team Member", "Client", "Ad
 current_month = datetime.now().strftime("%B %Y")
 
 # -----------------------------
-# MANAGER: ASSIGN & REVIEW
+# MANAGER
 # -----------------------------
 if role == "Manager":
     st.header("Manager Dashboard")
@@ -133,7 +130,8 @@ if role == "Manager":
         if "client_reviewed" in df.columns:
             df = df[df["client_reviewed"].astype(str).str.lower() == "true"]
         else:
-          df = pd.DataFrame()
+            df = pd.DataFrame()
+
         if df.empty:
             st.info("No client-approved tasks.")
         else:
@@ -232,10 +230,23 @@ elif role == "Admin":
         st.dataframe(top)
 
         st.subheader("K-Means Clustering (Performance)")
-        km = KMeans(n_clusters=3, n_init="auto").fit(df[["completion", "marks"]].fillna(0))
-        df["cluster"] = km.labels_
-        st.plotly_chart(px.scatter(df, x="completion", y="marks", color=df["cluster"].astype(str),
-                                   hover_data=["employee", "task"], title="Employee Task Clusters"))
+        if len(df) == 0:
+            st.info("No tasks available for clustering.")
+        else:
+            if len(df) == 1:
+                df["cluster"] = ["0"]
+                st.info("Only one task found — assigned to cluster 0.")
+            else:
+                n_clusters = min(3, len(df))
+                df_num = df[["completion", "marks"]].fillna(0)
+                km = KMeans(n_clusters=n_clusters, n_init="auto", random_state=42)
+                km.fit(df_num)
+                df["cluster"] = km.labels_.astype(str)
+
+            fig = px.scatter(df, x="completion", y="marks", color="cluster",
+                             hover_data=["employee", "task"],
+                             title="Employee Task Clusters")
+            st.plotly_chart(fig, use_container_width=True)
 
         st.subheader("Summary")
         avg_m = df["marks"].mean()
