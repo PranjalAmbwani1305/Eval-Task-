@@ -71,7 +71,8 @@ def safe_meta(md):
 def fetch_all():
     try:
         res = index.query(vector=rand_vec(), top_k=1000, include_metadata=True)
-        if not res.matches: return pd.DataFrame()
+        if not res.matches:
+            return pd.DataFrame()
         rows = []
         for m in res.matches:
             md = m.metadata or {}
@@ -89,11 +90,11 @@ role = st.sidebar.selectbox("Login as", ["Manager", "Team Member", "Client", "Ad
 current_month = datetime.now().strftime("%B %Y")
 
 # -----------------------------
-# MANAGER
+# MANAGER (BOSS)
 # -----------------------------
 if role == "Manager":
-    st.header("Manager Dashboard")
-    tab1, tab2 = st.tabs(["Assign Task", "Review Team Updates"])
+    st.header("Manager (Boss) Dashboard")
+    tab1, tab2 = st.tabs(["Assign Task", "Boss Review & Adjustment"])
 
     # Assign Task
     with tab1:
@@ -125,7 +126,7 @@ if role == "Manager":
                 index.upsert([{"id": tid, "values": rand_vec(), "metadata": md}])
                 st.success(f"Task '{task}' assigned to {employee}")
 
-    # Review Section
+    # Boss Review Section
     with tab2:
         df = fetch_all()
         if df.empty:
@@ -133,41 +134,48 @@ if role == "Manager":
         else:
             df.columns = [c.lower() for c in df.columns]
             df["completion"] = pd.to_numeric(df.get("completion", 0), errors="coerce").fillna(0)
-            df["reviewed"] = df.get("reviewed", False).astype(str).str.lower()
 
-            pending_reviews = df[
-                (df["completion"] > 0) &
-                (df["reviewed"] != "true")
-            ]
+            tasks_ready = df[df["completion"] > 0]
 
-            if pending_reviews.empty:
-                st.info("No team-submitted tasks pending review.")
+            if tasks_ready.empty:
+                st.info("No team-submitted tasks available for boss review.")
             else:
-                st.subheader("Tasks Ready for Manager Review")
-                for _, r in pending_reviews.iterrows():
-                    st.markdown(f"#### {r['task']}")
+                for _, r in tasks_ready.iterrows():
+                    st.markdown(f"### {r['task']}")
                     st.write(f"**Employee:** {r.get('employee', 'Unknown')}")
-                    st.write(f"**Completion:** {r.get('completion', 0)}%")
-                    st.write(f"**Status:** {r.get('status', 'N/A')}")
+                    st.write(f"**Reported Completion:** {r.get('completion', 0)}%")
+                    st.write(f"**Current Marks:** {r.get('marks', 0):.2f}")
                     st.write(f"**Deadline Risk:** {r.get('deadline_risk', 'N/A')}")
-                    st.write(f"**Description:** {r.get('description', '')}")
 
-                    marks = st.number_input(f"Marks (0–5) for {r['task']}", 0.0, 5.0, step=0.1)
-                    comments = st.text_area(f"Manager Comments for {r['task']}", key=f"mgr_{r['_id']}")
+                    # Boss adjustment slider
+                    adjusted_completion = st.slider(
+                        f"Adjust Completion % for {r['task']}",
+                        0, 100, int(r.get("completion", 0)), key=f"adj_{r['_id']}"
+                    )
 
-                    if st.button(f"Finalize Review for {r['task']}", key=f"btn_{r['_id']}"):
-                        sent_val = int(svm_clf.predict(vectorizer.transform([comments]))[0])
-                        sentiment = "Positive" if sent_val == 1 else "Negative"
+                    # Auto recalculate marks
+                    adjusted_marks = float(lin_reg.predict([[adjusted_completion]])[0])
+
+                    comments = st.text_area(f"Boss Comments for {r['task']}", key=f"boss_cmt_{r['_id']}")
+                    approve = st.radio(f"Approve Task {r['task']}?", ["Yes", "No"], key=f"boss_app_{r['_id']}")
+
+                    if st.button(f"Finalize Review for {r['task']}", key=f"final_{r['_id']}"):
+                        sentiment_val = int(svm_clf.predict(vectorizer.transform([comments]))[0])
+                        sentiment = "Positive" if sentiment_val == 1 else "Negative"
+
                         md = safe_meta({
                             **r,
-                            "marks": marks,
+                            "completion": adjusted_completion,
+                            "marks": adjusted_marks,
                             "manager_comments": comments,
                             "reviewed": True,
                             "sentiment": sentiment,
+                            "approved_by_boss": approve == "Yes",
                             "reviewed_on": now()
                         })
+
                         index.upsert([{"id": r["_id"], "values": rand_vec(), "metadata": md}])
-                        st.success(f"Review completed for {r['task']} ({sentiment}).")
+                        st.success(f"Review finalized for {r['task']} ({sentiment}) — Boss Set {adjusted_completion}%.")
 
 # -----------------------------
 # TEAM MEMBER
@@ -220,7 +228,8 @@ elif role == "Client":
     for tid, md in st.session_state.get("ctasks", []):
         st.subheader(md.get("task"))
         st.write(f"Employee: {md.get('employee')}")
-        st.write(f"Completion: {md.get('completion')}%")
+        st.write(f"Final Completion: {md.get('completion')}%")
+        st.write(f"Boss-Assigned Marks: {md.get('marks')}")
         comment = st.text_area(f"Feedback for {md.get('task')}", key=f"c_{tid}")
         if st.button(f"Approve {md.get('task')}", key=f"approve_{tid}"):
             md2 = safe_meta({
