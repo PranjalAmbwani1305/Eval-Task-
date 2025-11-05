@@ -1,577 +1,401 @@
-# app.py
-import streamlit as st
-from pinecone import Pinecone, ServerlessSpec
-import numpy as np
-import pandas as pd
+import os
 import uuid
-from datetime import datetime, date
+import time
+from datetime import datetime, timedelta
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.feature_extraction.text import CountVectorizer
-from sklearn.svm import SVC
 from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+
+import matplotlib.pyplot as plt
+import seaborn as sns
 import plotly.express as px
-import plotly.graph_objects as go
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 
-# Optional libraries
+# Optional: semantic embeddings + Pinecone
+USE_PINECONE = True
 try:
-    from textblob import TextBlob
-    TEXTBLOB_AVAILABLE = True
+    import pinecone
+    from sentence_transformers import SentenceTransformer
 except Exception:
-    TEXTBLOB_AVAILABLE = False
+    USE_PINECONE = False
 
-try:
-    from twilio.rest import Client as TwilioClient
-    TWILIO_AVAILABLE = True
-except Exception:
-    TWILIO_AVAILABLE = False
+# ---------------------- Helpers & Sample Data ----------------------
+DATA_DIR = "data"
+os.makedirs(DATA_DIR, exist_ok=True)
 
-# -----------------------------
-# CONFIG
-# -----------------------------
-st.set_page_config(page_title="Enterprise AI Task System", layout="wide")
-st.title("Enterprise AI Task & Performance Management")
+@st.cache_data
+def generate_sample_data(n_employees=8, n_tasks=60):
+    np.random.seed(42)
+    employees = []
+    depts = ["Audit", "Advisory", "Tax", "Consulting"]
+    roles = ["Analyst", "Senior", "Manager", "Director"]
+    for i in range(n_employees):
+        employees.append({
+            "employee_id": f"E{i+1}",
+            "name": f"Employee {i+1}",
+            "department": np.random.choice(depts),
+            "role": np.random.choice(roles),
+            "skill_score": np.random.randint(50, 100),
+            "capacity": np.random.randint(60, 100)  # percentage
+        })
 
-# -----------------------------
-# SAFE RERUN (compat)
-# -----------------------------
-def safe_rerun():
-    if hasattr(st, "rerun"):
-        st.rerun()
-    elif hasattr(st, "experimental_rerun"):
-        st.experimental_rerun()
+    employees = pd.DataFrame(employees)
 
-# -----------------------------
-# PINECONE INIT (expects secret)
-# -----------------------------
-if "PINECONE_API_KEY" not in st.secrets:
-    st.error("Add PINECONE_API_KEY to .streamlit/secrets.toml and restart.")
-    st.stop()
+    tasks = []
+    now = datetime.utcnow()
+    for t in range(n_tasks):
+        est_days = np.random.randint(1, 15)
+        assigned = employees.sample(1).iloc[0]
+        created = now - timedelta(days=np.random.randint(0, 30))
+        due = created + timedelta(days=est_days)
+        status = np.random.choice(["Pending", "In Progress", "Completed"], p=[0.2, 0.6, 0.2])
+        progress = 100 if status == "Completed" else np.random.randint(5, 95)
+        tasks.append({
+            "task_id": f"T{t+1}",
+            "title": f"Task {t+1} - {np.random.choice(['Audit', 'Model', 'Report', 'Review'])}",
+            "assigned_to": assigned["employee_id"],
+            "priority": np.random.choice(["Low", "Medium", "High"], p=[0.4, 0.4, 0.2]),
+            "created_at": created,
+            "due_date": due,
+            "status": status,
+            "progress": progress,
+            "complexity": np.random.randint(1, 10),
+            "estimated_hours": np.random.randint(1, 40),
+            "client_approved": np.random.choice([True, False], p=[0.6, 0.4])
+        })
 
-PINECONE_API_KEY = st.secrets["PINECONE_API_KEY"]
-pc = Pinecone(api_key=PINECONE_API_KEY)
-INDEX_NAME = st.secrets.get("PINECONE_INDEX", "task")
-DIMENSION = 1024
+    tasks = pd.DataFrame(tasks)
+    feedback = []
+    sample_texts = [
+        "Great collaboration and timely delivery.",
+        "Needs improvement in documentation.",
+        "Consistently excellent analytical thinking.",
+        "Communication could be clearer.",
+        "Very reliable and takes ownership.",
+        "Missed a few deadlines but quality is good."
+    ]
+    for i in range(40):
+        by = employees.sample(1).iloc[0]
+        about = employees.sample(1).iloc[0]
+        feedback.append({
+            "feedback_id": f"F{i+1}",
+            "from": by["employee_id"],
+            "about": about["employee_id"],
+            "text": np.random.choice(sample_texts),
+            "created_at": now - timedelta(days=np.random.randint(0, 60))
+        })
+    feedback = pd.DataFrame(feedback)
 
-# Create index if not exists
-try:
-    if INDEX_NAME not in [i["name"] for i in pc.list_indexes()]:
-        pc.create_index(
-            name=INDEX_NAME,
-            dimension=DIMENSION,
-            metric="cosine",
-            spec=ServerlessSpec(cloud="aws", region="us-east-1")
-        )
-    index = pc.Index(INDEX_NAME)
-except Exception as e:
-    st.error(f"Pinecone init failed: {e}")
-    st.stop()
+    employees.to_csv(os.path.join(DATA_DIR, "employees.csv"), index=False)
+    tasks.to_csv(os.path.join(DATA_DIR, "tasks.csv"), index=False)
+    feedback.to_csv(os.path.join(DATA_DIR, "feedback.csv"), index=False)
 
-# -----------------------------
-# HELPERS: time, stable vector, safe metadata/upsert
-# -----------------------------
-def now():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return employees, tasks, feedback
 
-def stable_vec(text: str):
-    """Deterministic pseudo-embedding for task text (1024 dims)."""
-    # Use a seeded RNG so same text yields same vector.
-    h = abs(hash(text)) % (2**32)
-    rng = np.random.default_rng(h)
-    return rng.random(DIMENSION).tolist()
+@st.cache_data
+def load_data():
+    employees_path = os.path.join(DATA_DIR, "employees.csv")
+    tasks_path = os.path.join(DATA_DIR, "tasks.csv")
+    feedback_path = os.path.join(DATA_DIR, "feedback.csv")
+    if not (os.path.exists(employees_path) and os.path.exists(tasks_path) and os.path.exists(feedback_path)):
+        return generate_sample_data()
+    employees = pd.read_csv(employees_path)
+    tasks = pd.read_csv(tasks_path, parse_dates=["created_at", "due_date"]) 
+    feedback = pd.read_csv(feedback_path, parse_dates=["created_at"]) 
+    return employees, tasks, feedback
 
-def safe_meta(md: dict):
-    """Convert dates and non-JSON-safe values to serializable ones."""
-    clean = {}
-    for k, v in md.items():
-        if isinstance(v, (datetime, date)):
-            clean[k] = v.isoformat()
-        elif v is None:
-            clean[k] = ""
-        else:
-            # ensure simple types
-            if isinstance(v, (str, int, float, bool, list, dict)):
-                clean[k] = v
-            else:
-                clean[k] = str(v)
-    return clean
+employees, tasks, feedback = load_data()
 
-def safe_upsert(index, md: dict):
-    """Wrap Pinecone upsert with checks: ensures id, vector dimension, JSON-safe metadata."""
-    try:
-        if "_id" not in md or not md["_id"]:
-            md["_id"] = str(uuid.uuid4())
-        vec = stable_vec(str(md.get("task", md["_id"])))
-        if len(vec) != DIMENSION:
-            st.error("Embedding dimension mismatch.")
-            return False
-        meta = safe_meta(md)
-        index.upsert([{"id": str(md["_id"]), "values": vec, "metadata": meta}])
-        return True
-    except Exception as e:
-        st.error(f"Pinecone upsert failed: {e}")
-        return False
+# ---------------------- ML: Train simple demo models ----------------------
+@st.cache_resource
+def train_demo_models(tasks_df, employees_df):
+    # Predict marks (simulated continuous score) with linear regression
+    df = tasks_df.copy()
+    # feature: complexity, estimated_hours, progress
+    X_reg = df[["complexity", "estimated_hours", "progress"]].fillna(0)
+    # synthetic target: higher complexity and more hours -> higher 'marks' (pretend score)
+    y_reg = (100 - df["complexity"] * 3 + (df["progress"] * 0.2) + np.random.randn(len(df)) * 5).clip(0, 100)
+    lin = LinearRegression().fit(X_reg, y_reg)
 
-def to_df_from_matches(matches):
-    rows = []
-    for m in matches:
-        md = m.metadata or {}
-        md["_id"] = m.id
-        rows.append(md)
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    # normalize column names to lowercase
-    df.columns = [c.lower() for c in df.columns]
-    return df
+    # Task status classifier: Completed (1) vs not (0)
+    X_clf = df[["progress", "estimated_hours"]].fillna(0)
+    y_clf = (df["status"] == "Completed").astype(int)
+    log = LogisticRegression(max_iter=500).fit(X_clf, y_clf)
 
-def fetch_filtered(filter_dict=None, top_k=10000):
-    try:
-        res = index.query(vector=stable_vec("query"), top_k=top_k, include_metadata=True, filter=filter_dict or {})
-        return to_df_from_matches(res.matches or [])
-    except Exception as e:
-        st.warning(f"Fetch failed: {e}")
-        return pd.DataFrame()
+    # Deadline risk: high risk if due soon and low progress
+    X_rf = df[["progress", "estimated_hours", "complexity"]].fillna(0)
+    # Create risk label
+    days_left = (df["due_date"] - pd.Timestamp.utcnow()).dt.days.fillna(0)
+    y_rf = ((days_left < 2) & (df["progress"] < 50)).astype(int)
+    rf = RandomForestClassifier(n_estimators=50).fit(X_rf, y_rf)
 
-def fetch_all(top_k=10000):
-    try:
-        res = index.query(vector=stable_vec("all"), top_k=top_k, include_metadata=True)
-        return to_df_from_matches(res.matches or [])
-    except Exception as e:
-        st.warning(f"Fetch all failed: {e}")
-        return pd.DataFrame()
-
-# -----------------------------
-# SIMPLE AI MODELS + NLP
-# -----------------------------
-lin_reg = LinearRegression()
-lin_reg.fit([[0], [50], [100]], [0, 2.5, 5])
-
-log_reg = LogisticRegression()
-log_reg.fit([[0], [40], [80], [100]], [0, 0, 1, 1])
-
-# small textset SVM fallback for sentiment
-small_comments = ["excellent work", "needs improvement", "bad performance", "great job", "average"]
-small_labels = [1, 0, 0, 1, 0]
-vectorizer = CountVectorizer()
-X_small = vectorizer.fit_transform(small_comments)
-svm_sent = SVC()
-svm_sent.fit(X_small, small_labels)
-
-rf = RandomForestClassifier()
-rf.fit(np.array([[10, 2], [50, 1], [90, 0], [100, 0]]), [0, 1, 0, 0])
-
-def analyze_sentiment(text: str):
-    t = (text or "").strip()
-    if not t:
-        return {"label": "Neutral", "polarity": 0.0, "subjectivity": 0.0}
-    if TEXTBLOB_AVAILABLE:
-        tb = TextBlob(t)
-        p = tb.sentiment.polarity
-        s = tb.sentiment.subjectivity
-        if p > 0.35:
-            label = "Positive"
-        elif p < -0.25:
-            label = "Negative"
-        else:
-            label = "Neutral"
-        return {"label": label, "polarity": p, "subjectivity": s}
+    # KMeans on employee KPI features
+    emp_feats = employees_df[["skill_score", "capacity"]].fillna(0)
+    scaler = StandardScaler().fit(emp_feats)
+    emp_scaled = scaler.transform(emp_feats)
+    n_clusters = min(3, max(1, len(emp_feats)))
+    if len(emp_feats) < 2:
+        kmeans = None
     else:
-        try:
-            pred = int(svm_sent.predict(vectorizer.transform([t]))[0])
-            return {"label": "Positive" if pred == 1 else "Negative", "polarity": 0.5 if pred == 1 else -0.3, "subjectivity": 0.5}
-        except Exception:
-            return {"label": "Neutral", "polarity": 0.0, "subjectivity": 0.0}
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42).fit(emp_scaled)
 
-# -----------------------------
-# Notifications (SMTP + Twilio optional)
-# -----------------------------
-EMAIL_SENDER = st.secrets.get("EMAIL_SENDER", "")
-EMAIL_PASSWORD = st.secrets.get("EMAIL_PASSWORD", "")
-TWILIO_SID = st.secrets.get("TWILIO_SID", "")
-TWILIO_TOKEN = st.secrets.get("TWILIO_TOKEN", "")
-TWILIO_FROM = st.secrets.get("TWILIO_FROM", "")
+    return {
+        "linear": lin,
+        "logistic": log,
+        "rf": rf,
+        "kmeans": kmeans,
+        "scaler": scaler
+    }
 
-def send_email(to_email: str, subject: str, body: str):
-    if not EMAIL_SENDER or not EMAIL_PASSWORD:
-        st.info("Email not configured in secrets. Skipping email.")
-        return False
+models = train_demo_models(tasks, employees)
+
+# ---------------------- Pinecone: Embeddings & Index ----------------------
+EMBED_MODEL = None
+PINECONE_INDEX_NAME = "feedback-embeds"
+
+def init_pinecone():
+    global EMBED_MODEL
+    if not USE_PINECONE:
+        return None
+
+    api_key = os.getenv("PINECONE_API_KEY") or st.secrets.get("PINECONE_API_KEY", None)
+    env = os.getenv("PINECONE_ENV") or st.secrets.get("PINECONE_ENV", None)
+    if not api_key or not env:
+        st.info("Pinecone not configured. Set PINECONE_API_KEY and PINECONE_ENV in environment or Streamlit secrets to enable semantic search.")
+        return None
     try:
-        msg = MIMEMultipart()
-        msg["From"] = EMAIL_SENDER
-        msg["To"] = to_email
-        msg["Subject"] = subject
-        msg.attach(MIMEText(body, "plain"))
-        with smtplib.SMTP("smtp.gmail.com", 587) as s:
-            s.starttls()
-            s.login(EMAIL_SENDER, EMAIL_PASSWORD)
-            s.send_message(msg)
-        return True
+        pinecone.init(api_key=api_key, environment=env)
+        if PINECONE_INDEX_NAME not in pinecone.list_indexes():
+            pinecone.create_index(PINECONE_INDEX_NAME, dimension=384, metric="cosine")
+        index = pinecone.Index(PINECONE_INDEX_NAME)
+        EMBED_MODEL = SentenceTransformer('all-MiniLM-L6-v2')
+        return index
     except Exception as e:
-        st.warning(f"Email send failed: {e}")
-        return False
+        st.error(f"Pinecone init failed: {e}")
+        return None
 
-def send_sms(to_number: str, body: str):
-    if not (TWILIO_SID and TWILIO_TOKEN and TWILIO_FROM and TWILIO_AVAILABLE):
-        st.info("Twilio not configured or available; skipping SMS.")
-        return False
+pinecone_index = init_pinecone()
+
+def upsert_feedback_to_pinecone(feedback_df):
+    if not pinecone_index or EMBED_MODEL is None:
+        return
+    to_upsert = []
+    for _, row in feedback_df.iterrows():
+        vec = EMBED_MODEL.encode(row["text"]).tolist()
+        meta = {"feedback_id": row["feedback_id"], "from": row["from"], "about": row["about"]}
+        to_upsert.append((row["feedback_id"], vec, meta))
+    # Pinecone upsert in batches
+    batch_size = 50
+    for i in range(0, len(to_upsert), batch_size):
+        pinecone_index.upsert(vectors=to_upsert[i:i+batch_size])
+
+# optionally upsert sample feedback
+if pinecone_index is not None and len(feedback) > 0:
     try:
-        client = TwilioClient(TWILIO_SID, TWILIO_TOKEN)
-        client.messages.create(body=body, from_=TWILIO_FROM, to=to_number)
-        return True
-    except Exception as e:
-        st.warning(f"SMS send failed: {e}")
-        return False
+        upsert_feedback_to_pinecone(feedback)
+    except Exception:
+        pass
 
-def notify(email=None, phone=None, subject="Update", message=""):
-    ok = True
-    if email:
-        ok = send_email(email, subject, message) or ok
-    if phone:
-        ok = send_sms(phone, message) or ok
-    return ok
+# ---------------------- Streamlit UI ----------------------
+st.set_page_config(page_title="AI Workforce Dashboard — Big 4 Edition", layout="wide")
 
-# -----------------------------
-# UI: Role selection
-# -----------------------------
-role = st.sidebar.selectbox("Login as", ["Admin", "Manager", "Team Member", "Client"])
-current_month = datetime.now().strftime("%B %Y")
+st.header("AI Workforce Performance & Task Intelligence — Big 4 Edition")
 
-# -----------------------------
-# Admin Dashboard (enterprise-level)
-# -----------------------------
-if role == "Admin":
-    st.header("Admin — Enterprise Dashboard")
-    tab_overview, tab_users, tab_audit = st.tabs(["Overview & Analytics", "Companies & Users", "Audit & Export"])
+menu = st.sidebar.selectbox("Select module", ["Manager Dashboard", "Task Management", "360 Feedback", "Admin / Exports", "Semantic Search (Pinecone)"])
 
-    # Overview & Analytics
-    with tab_overview:
-        st.subheader("Global Task Analytics")
-        df = fetch_all()
-        if df.empty:
-            st.info("No tasks available in the system.")
-        else:
-            # normalize numeric columns
-            df["marks"] = pd.to_numeric(df.get("marks", 0), errors="coerce").fillna(0)
-            df["completion"] = pd.to_numeric(df.get("completion", 0), errors="coerce").fillna(0)
-            # Top employees
-            st.markdown("### Top Employees by Average Marks")
-            top = df.groupby("employee")["marks"].mean().reset_index().sort_values("marks", ascending=False).head(10)
-            st.dataframe(top)
+# ---------------------- Manager Dashboard ----------------------
+if menu == "Manager Dashboard":
+    st.subheader("Single-pane Manager View")
+    total = len(tasks)
+    pending = len(tasks[tasks["status"] == "Pending"])
+    in_progress = len(tasks[tasks["status"] == "In Progress"])
+    completed = len(tasks[tasks["status"] == "Completed"])
+    overdue = len(tasks[(tasks["due_date"] < pd.Timestamp.utcnow()) & (tasks["status"] != "Completed")])
 
-            # charts
-            st.markdown("### Performance Charts")
-            col1, col2 = st.columns(2)
-            with col1:
-                fig_bar = px.bar(top, x="employee", y="marks", title="Top Employees by Marks")
-                st.plotly_chart(fig_bar, use_container_width=True)
-            with col2:
-                if len(df) >= 2:
-                    # kmeans clustering
-                    n_clusters = min(3, len(df))
-                    km = KMeans(n_clusters=n_clusters, n_init=10).fit(df[["completion", "marks"]].fillna(0))
-                    df["cluster"] = km.labels_
-                    fig_scatter = px.scatter(df, x="completion", y="marks", color=df["cluster"].astype(str),
-                                             hover_data=["employee", "task"], title="Completion vs Marks Clusters")
-                    st.plotly_chart(fig_scatter, use_container_width=True)
-                else:
-                    st.info("Not enough records for clustering.")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Total Tasks", total)
+    col2.metric("In Progress", in_progress)
+    col3.metric("Completed", completed)
+    col4.metric("Overdue", overdue)
 
-            # Summary metrics
-            avg_marks = df["marks"].mean()
-            avg_comp = df["completion"].mean()
-            st.info(f"Average marks: {avg_marks:.2f} • Average completion: {avg_comp:.1f}%")
-            # Export
-            st.download_button("Download All Tasks (CSV)", df.to_csv(index=False), file_name="tasks_all.csv", mime="text/csv")
+    st.markdown("---")
+    st.subheader("Team Performance Heatmap")
+    # build performance matrix: rows employees, cols KPI
+    perf = employees.set_index("employee_id")[['skill_score','capacity']]
+    fig, ax = plt.subplots(figsize=(8, max(2, len(employees) * 0.5)))
+    sns.heatmap(perf, annot=True, cmap="YlOrBr", ax=ax)
+    st.pyplot(fig)
 
-    # Companies & Users (lightweight management)
-    with tab_users:
-        st.subheader("Companies & Quick User Management")
-        # For simplicity, management is stored as Pinecone metadata; in prod you'd use a proper DB.
-        st.info("This panel allows quick admin-level actions on tasks and user lookup.")
-        company_filter = st.text_input("Filter tasks by company (optional)")
-        if st.button("Load Tasks"):
-            if company_filter:
-                df = fetch_filtered({"company": {"$eq": company_filter}})
-            else:
-                df = fetch_all()
-            if df.empty:
-                st.info("No matching tasks.")
-            else:
-                st.dataframe(df[["company", "employee", "task", "completion", "marks", "status"]])
+    st.subheader("AI Alerts")
+    # Simple checks
+    overload = employees[employees['capacity'] > 85]
+    if not overload.empty:
+        for _, r in overload.iterrows():
+            st.warning(f"High capacity: {r['name']} ({r['employee_id']}) — capacity {r['capacity']}%")
+    else:
+        st.success("No immediate capacity alerts")
 
-    with tab_audit:
-        st.subheader("Audit & Action Logs")
-        st.info("Action logs are kept in task metadata under 'manager_actions'.")
-        df = fetch_all()
-        if df.empty:
-            st.info("No data.")
-        else:
-            # extract manager actions
-            logs = []
-            for _, r in df.iterrows():
-                ma = r.get("manager_actions", []) or []
-                for act in ma:
-                    logs.append({
-                        "task": r.get("task"), "employee": r.get("employee"),
-                        "type": act.get("type"), "note": act.get("note"), "by": act.get("by"), "on": act.get("on")
+    # Goal tracker: sample
+    st.subheader("Goal Tracker")
+    target_completed = 30
+    prog = min(100, int((completed / target_completed) * 100))
+    st.progress(prog)
+    st.caption(f"{completed} of {target_completed} tasks completed this period ({prog}%)")
+
+# ---------------------- Task Management ----------------------
+elif menu == "Task Management":
+    st.subheader("Task Management Panel — Create, Assign, Prioritize")
+    with st.form("create_task_form"):
+        title = st.text_input("Task title")
+        assigned_to = st.selectbox("Assign To", employees['employee_id'].tolist())
+        priority = st.selectbox("Priority", ["Low","Medium","High"])
+        est_hours = st.number_input("Estimated hours", min_value=1, max_value=200, value=8)
+        complexity = st.slider("Complexity (1-10)", 1, 10, 5)
+        due_days = st.number_input("Due in (days)", min_value=1, max_value=90, value=7)
+        create_btn = st.form_submit_button("Create Task")
+        if create_btn:
+            new_t = {
+                'task_id': f"T{len(tasks)+1}",
+                'title': title or f"Task {len(tasks)+1}",
+                'assigned_to': assigned_to,
+                'priority': priority,
+                'created_at': pd.Timestamp.utcnow(),
+                'due_date': pd.Timestamp.utcnow() + pd.Timedelta(days=int(due_days)),
+                'status': 'Pending',
+                'progress': 0,
+                'complexity': complexity,
+                'estimated_hours': est_hours,
+                'client_approved': False
+            }
+            tasks.loc[len(tasks)] = new_t
+            tasks.to_csv(os.path.join(DATA_DIR, "tasks.csv"), index=False)
+            st.success("Task created and saved")
+
+    st.markdown("---")
+    st.subheader("Task List")
+    st.dataframe(tasks.sort_values('due_date'))
+
+    st.markdown("---")
+    st.subheader("AI Predictions for Selected Task")
+    sel_task_id = st.selectbox("Select task", tasks['task_id'].tolist())
+    sel_task = tasks[tasks['task_id'] == sel_task_id].iloc[0]
+    X_reg = np.array([[sel_task['complexity'], sel_task['estimated_hours'], sel_task['progress']]])
+    pred_marks = models['linear'].predict(X_reg)[0]
+    X_clf = np.array([[sel_task['progress'], sel_task['estimated_hours']]])
+    pred_status_prob = models['logistic'].predict_proba(X_clf)[0][1]
+    X_rf = np.array([[sel_task['progress'], sel_task['estimated_hours'], sel_task['complexity']]])
+    pred_deadline_risk = models['rf'].predict_proba(X_rf)[0][1]
+
+    st.metric("Predicted Marks", f"{pred_marks:.1f} / 100")
+    st.metric("Probability Completed Soon", f"{pred_status_prob*100:.1f}%")
+    st.metric("Deadline Risk", f"{pred_deadline_risk*100:.1f}%")
+
+    st.caption("AI suggestions: use manager actions to reassign or set reminders if deadline risk > 50%")
+
+# ---------------------- 360 Feedback ----------------------
+elif menu == "360 Feedback":
+    st.subheader("Employee Performance & 360° Feedback Module")
+    col1, col2 = st.columns([2,1])
+    with col1:
+        st.markdown("**Submit Feedback**")
+        fb_from = st.selectbox("From", employees['employee_id'].tolist())
+        fb_about = st.selectbox("About", employees['employee_id'].tolist(), index=1)
+        fb_text = st.text_area("Feedback text")
+        if st.button("Submit Feedback") and fb_text.strip():
+            new_fb = {
+                'feedback_id': f"F{len(feedback)+1}",
+                'from': fb_from,
+                'about': fb_about,
+                'text': fb_text,
+                'created_at': pd.Timestamp.utcnow()
+            }
+            feedback.loc[len(feedback)] = new_fb
+            feedback.to_csv(os.path.join(DATA_DIR, "feedback.csv"), index=False)
+            # upsert to pinecone if available
+            try:
+                if pinecone_index and EMBED_MODEL:
+                    vec = EMBED_MODEL.encode(fb_text).tolist()
+                    pinecone_index.upsert(vectors=[(new_fb['feedback_id'], vec, {'from': fb_from, 'about': fb_about})])
+            except Exception:
+                pass
+            st.success("Feedback submitted")
+
+    with col2:
+        st.markdown("**Aggregate Sentiment (quick heuristic)**")
+        # quick sentiment heuristic: positive words
+        positive = feedback['text'].str.contains("great|excellent|reliable|timely|ownership", case=False, na=False).sum()
+        negative = feedback['text'].str.contains("missed|needs|improvement|unclear", case=False, na=False).sum()
+        st.write(f"Positive mentions: {positive}")
+        st.write(f"Negative mentions: {negative}")
+
+    st.markdown("---")
+    st.subheader("Feedback Table")
+    st.dataframe(feedback.sort_values('created_at', ascending=False))
+
+# ---------------------- Admin / Exports ----------------------
+elif menu == "Admin / Exports":
+    st.subheader("Admin Dashboard & Exports")
+    st.markdown("**Employee stats**")
+    st.dataframe(employees)
+
+    st.markdown("**K-Means clustering on employees (safe fallback for 1 record)**")
+    emp_feats = employees[["skill_score","capacity"]].fillna(0)
+    if len(emp_feats) < 2:
+        st.info("Not enough records for clustering. Showing single-cluster fallback.")
+        employees['cluster'] = 0
+    else:
+        scaled = models['scaler'].transform(emp_feats)
+        k = min(3, len(emp_feats))
+        kmeans = KMeans(n_clusters=k, random_state=42).fit(scaled)
+        employees['cluster'] = kmeans.labels_
+    st.dataframe(employees)
+
+    st.markdown("---")
+    st.subheader("Export Summary + CSV")
+    summary = {
+        'total_tasks': len(tasks),
+        'pending': len(tasks[tasks['status']=='Pending']),
+        'in_progress': len(tasks[tasks['status']=='In Progress']),
+        'completed': len(tasks[tasks['status']=='Completed']),
+        'overdue': len(tasks[(tasks['due_date'] < pd.Timestamp.utcnow()) & (tasks['status'] != 'Completed')])
+    }
+    st.json(summary)
+
+    if st.button("Download full CSV export"):
+        export_df = tasks.merge(employees, left_on='assigned_to', right_on='employee_id', how='left')
+        csv = export_df.to_csv(index=False).encode('utf-8')
+        st.download_button(label="Download CSV", data=csv, file_name="tasks_export.csv", mime='text/csv')
+
+# ---------------------- Semantic Search / Pinecone ----------------------
+elif menu == "Semantic Search (Pinecone)":
+    st.subheader("Semantic Search over Feedback (Pinecone)")
+    if not pinecone_index or EMBED_MODEL is None:
+        st.info("Pinecone not configured or missing embedding model. Please set PINECONE_API_KEY and PINECONE_ENV and install sentence-transformers.")
+    else:
+        q = st.text_input("Search feedback (natural language)")
+        top_k = st.slider("Top K", 1, 10, 5)
+        if st.button("Search") and q.strip():
+            qv = EMBED_MODEL.encode(q).tolist()
+            try:
+                res = pinecone_index.query(vector=qv, top_k=top_k, include_metadata=True)
+                hits = res['matches']
+                out = []
+                for h in hits:
+                    out.append({
+                        'feedback_id': h['id'],
+                        'score': h['score'],
+                        'from': h['metadata'].get('from'),
+                        'about': h['metadata'].get('about')
                     })
-            if logs:
-                logs_df = pd.DataFrame(logs).sort_values("on", ascending=False)
-                st.dataframe(logs_df)
-                st.download_button("Download Audit CSV", logs_df.to_csv(index=False), file_name="audit.csv", mime="text/csv")
-            else:
-                st.info("No manager actions recorded yet.")
-
-# -----------------------------
-# Manager Dashboard
-# -----------------------------
-elif role == "Manager":
-    st.header("Manager — Assign, Review, 360°")
-    tab_assign, tab_review, tab_360 = st.tabs(["Assign Task", "Boss Review & Adjustment", "Manager 360°"])
-
-    # Assign
-    with tab_assign:
-        st.subheader("Assign Task")
-        with st.form("assign_form"):
-            company = st.text_input("Company")
-            employee = st.text_input("Employee")
-            email = st.text_input("Employee Email (optional)")
-            phone = st.text_input("Employee Phone (optional)")
-            task = st.text_input("Task Title")
-            desc = st.text_area("Description")
-            deadline = st.date_input("Deadline", value=date.today())
-            submit = st.form_submit_button("Assign")
-            if submit:
-                if not (company and employee and task):
-                    st.warning("Company, Employee, and Task are required.")
-                else:
-                    tid = str(uuid.uuid4())
-                    md = {
-                        "_id": tid, "company": company, "employee": employee,
-                        "email": email, "phone": phone, "task": task, "description": desc,
-                        "deadline": deadline.isoformat(), "month": current_month,
-                        "completion": 0, "marks": 0, "status": "Assigned", "reviewed": False,
-                        "client_reviewed": False, "assigned_on": now(), "manager_actions": []
-                    }
-                    ok = safe_upsert(index, md)
-                    if ok:
-                        notify_msg = f"You were assigned a new task: {task} (Company: {company}). Deadline: {deadline}"
-                        notify(email if email else None, phone if phone else None, subject=f"New Task: {task}", message=notify_msg)
-                        st.success("Task assigned.")
-                        safe_rerun()
-
-    # Review & Adjustment
-    with tab_review:
-        st.subheader("Review Team Submissions")
-        # filter by company optional
-        company_filter = st.text_input("Filter by Company (optional)")
-        if company_filter:
-            df = fetch_filtered({"company": {"$eq": company_filter}})
-        else:
-            df = fetch_all()
-        if df.empty:
-            st.info("No tasks to show.")
-        else:
-            df = df.fillna("")
-            # Show only tasks with some completion (team submitted)
-            submitted = df[pd.to_numeric(df["completion"], errors="coerce").fillna(0) > 0]
-            if submitted.empty:
-                st.info("No submitted tasks yet.")
-            else:
-                for _, r in submitted.iterrows():
-                    st.markdown("----")
-                    st.markdown(f"### {r.get('task')}")
-                    left, right = st.columns([2,1])
-                    with left:
-                        st.write(f"Employee: {r.get('employee')} • Company: {r.get('company')}")
-                        st.write(f"Reported Completion: {r.get('completion')}%")
-                        st.write(f"Current Marks: {r.get('marks')}")
-                        st.write(f"Deadline Risk: {r.get('deadline_risk','N/A')}")
-                        st.write("Manager actions:")
-                        for a in (r.get("manager_actions") or []):
-                            st.write(f"- {a.get('type')} on {a.get('on')}: {a.get('note')}")
-                    with right:
-                        adj = st.slider("Adjust Completion", 0, 100, int(r.get("completion", 0)), key=f"adj_{r['_id']}")
-                        marks_calc = float(lin_reg.predict([[adj]])[0])
-                        comments = st.text_area("Comments", key=f"com_{r['_id']}")
-                        approve = st.selectbox("Approve?", ["No", "Yes"], key=f"app_{r['_id']}")
-                        reassign_to = st.text_input("Reassign to (optional)", key=f"re_{r['_id']}")
-                        escalate = st.checkbox("Escalate", key=f"esc_{r['_id']}")
-                        note_type = st.selectbox("Note type", ["None","Appreciation","Warning","Suggestion"], key=f"nt_{r['_id']}")
-                        note_text = st.text_area("Note text", key=f"ntxt_{r['_id']}")
-                        if st.button("Finalize Review", key=f"fin_{r['_id']}"):
-                            sinfo = analyze_sentiment(comments)
-                            md = dict(r)
-                            md.update({
-                                "completion": int(adj),
-                                "marks": marks_calc,
-                                "manager_comments": comments,
-                                "reviewed": True,
-                                "sentiment": sinfo["label"],
-                                "approved_by_boss": (approve == "Yes"),
-                                "reviewed_on": now()
-                            })
-                            # reassign
-                            if reassign_to:
-                                old = md.get("employee")
-                                md["employee"] = reassign_to
-                                md.setdefault("manager_actions", []).append({"type":"Reassigned","note":f"{old} -> {reassign_to}","by":"Manager","on":now()})
-                                # notify
-                                notify(md.get("email"), md.get("phone"), subject="Task Reassigned", message=f"Task '{md.get('task')}' reassigned to {reassign_to}")
-                            # escalate
-                            if escalate:
-                                md["escalated"] = True
-                                md.setdefault("manager_actions", []).append({"type":"Escalated","note":note_text or "Escalated","by":"Manager","on":now()})
-                                # admin notification if set
-                                admin_email = st.secrets.get("ADMIN_EMAIL")
-                                if admin_email:
-                                    send_email(admin_email, f"Task Escalated: {md.get('task')}", f"Task escalated by manager: {note_text}")
-                            # note
-                            if note_type and note_type != "None":
-                                md.setdefault("manager_actions", []).append({"type":note_type,"note":note_text,"by":"Manager","on":now()})
-                            safe_upsert(index, md)
-                            notify(md.get("email"), md.get("phone"), subject=f"Task Reviewed: {md.get('task')}",
-                                   message=f"Your task '{md.get('task')}' reviewed. Completion set to {md.get('completion')}%.")
-                            st.success("Review finalized.")
-                            safe_rerun()
-
-    # Manager 360
-    with tab_360:
-        st.subheader("360° Performance Summaries")
-        company_360 = st.text_input("Company (optional)")
-        period = st.text_input("Period (e.g., 'November 2025')", value=current_month)
-        if st.button("Generate 360° Summaries"):
-            if company_360:
-                df = fetch_filtered({"company": {"$eq": company_360}})
-            else:
-                df = fetch_all()
-            if df.empty:
-                st.info("No data for 360° generation.")
-            else:
-                df["marks"] = pd.to_numeric(df.get("marks",0), errors="coerce")
-                df["completion"] = pd.to_numeric(df.get("completion",0), errors="coerce")
-                reps = []
-                for emp, group in df.groupby("employee"):
-                    avg_marks = float(group["marks"].mean() or 0)
-                    avg_comp = float(group["completion"].mean() or 0)
-                    high_quality = len(group[group["completion"]>=90])
-                    reviewed_count = len(group[group.get("reviewed","") == True])
-                    pos = len(group[group.get("sentiment","") == "Positive"])
-                    neg = len(group[group.get("sentiment","") == "Negative"])
-                    tone = "Balanced"
-                    if pos > neg + 1:
-                        tone = "Strong positive feedback"
-                    elif neg > pos + 1:
-                        tone = "Concerns flagged"
-                    summary_text = (f"{emp}: Avg Marks {avg_marks:.2f}, Avg Completion {avg_comp:.1f}%. High-quality tasks: {high_quality}. Reviewed: {reviewed_count}. Tone: {tone}")
-                    reps.append({"employee": emp, "avg_marks": avg_marks, "avg_comp": avg_comp, "high_quality": high_quality, "reviewed": reviewed_count, "pos": pos, "neg": neg, "summary": summary_text})
-                rep_df = pd.DataFrame(reps).sort_values("avg_marks", ascending=False)
-                st.dataframe(rep_df)
-                st.download_button("Download 360 CSV", rep_df.to_csv(index=False), file_name="360_summary.csv", mime="text/csv")
-
-# -----------------------------
-# Team Member Dashboard
-# -----------------------------
-elif role == "Team Member":
-    st.header("Team Member — Update Progress (AI Feedback)")
-    company = st.text_input("Company")
-    employee = st.text_input("Your name")
-    if st.button("Load My Tasks"):
-        if not (company and employee):
-            st.warning("Enter company and your name.")
-        else:
-            try:
-                res = index.query(vector=stable_vec(employee), top_k=500, include_metadata=True, filter={"company": {"$eq": company}, "employee": {"$eq": employee}})
-                st.session_state["tasks"] = [(m.id, m.metadata) for m in res.matches or []]
-                st.success(f"Loaded {len(st.session_state['tasks'])} tasks.")
+                st.table(pd.DataFrame(out))
             except Exception as e:
-                st.error(f"Error loading tasks: {e}")
+                st.error(f"Query failed: {e}")
 
-    tasks = st.session_state.get("tasks", [])
-    if isinstance(tasks, list) and all(isinstance(x, (tuple, list)) and len(x) == 2 for x in tasks):
-        for tid, md in tasks:
-            if not isinstance(md, dict):
-                continue
-            st.markdown("----")
-            st.subheader(md.get("task", "Unnamed"))
-            st.write(md.get("description", ""))
-            curr = float(md.get("completion", 0) or 0)
-            new = st.slider("Completion %", 0, 100, int(curr), key=f"tm_{tid}")
-            overtime = st.number_input("Overtime hours (optional)", min_value=0.0, value=float(md.get("overtime", 0) or 0.0), step=0.5, key=f"ot_{tid}")
-            request_help = st.checkbox("Request help/escalation", key=f"help_{tid}")
-            if st.button("Submit Update", key=f"submit_{tid}"):
-                marks = float(lin_reg.predict([[new]])[0])
-                status = "On Track" if log_reg.predict([[new]])[0] == 1 else "Delayed"
-                risk_pred = rf.predict([[new, 0]])[0]
-                md2 = dict(md)
-                md2.update({
-                    "completion": int(new),
-                    "marks": marks,
-                    "status": status,
-                    "deadline_risk": "High" if risk_pred else "Low",
-                    "overtime": float(overtime),
-                    "help_requested": bool(request_help),
-                    "submitted_on": now()
-                })
-                # sentiment from any quick note (optional)
-                safe_upsert(index, md2)
-                # notify manager if configured in secrets
-                mgr_email = st.secrets.get("MANAGER_EMAIL")
-                if mgr_email:
-                    notify(mgr_email, None, subject=f"Update: {md2.get('task')}", message=f"{employee} updated '{md2.get('task')}' to {new}%")
-                st.success(f"Update submitted — {status} (Risk: {md2['deadline_risk']})")
-                safe_rerun()
-    else:
-        st.info("No tasks loaded. Click 'Load My Tasks' to fetch assignments.")
-
-# -----------------------------
-# Client Dashboard
-# -----------------------------
-elif role == "Client":
-    st.header("Client — Review & Approve")
-    company = st.text_input("Company Name")
-    if st.button("Load Reviewed Tasks"):
-        if not company:
-            st.warning("Enter company name.")
-        else:
-            try:
-                res = index.query(vector=stable_vec(company), top_k=500, include_metadata=True, filter={"company": {"$eq": company}, "reviewed": {"$eq": True}})
-                st.session_state["ctasks"] = [(m.id, m.metadata) for m in res.matches or []]
-                st.success(f"Loaded {len(st.session_state['ctasks'])} tasks.")
-            except Exception as e:
-                st.error(f"Load failed: {e}")
-
-    ctasks = st.session_state.get("ctasks", [])
-    if isinstance(ctasks, list) and all(isinstance(x, (tuple, list)) and len(x) == 2 for x in ctasks):
-        for tid, md in ctasks:
-            if not isinstance(md, dict):
-                continue
-            st.markdown("----")
-            st.subheader(md.get("task", "Unnamed"))
-            st.write(f"Employee: {md.get('employee', '')}")
-            st.write(f"Completion: {md.get('completion', 0)}% • Marks: {md.get('marks', 0)}")
-            client_feedback = st.text_area("Client Feedback (optional)", key=f"cf_{tid}")
-            decision = st.selectbox("Decision", ["Approve Deliverable", "Approve with changes", "Reject"], key=f"cd_{tid}")
-            if st.button("Submit Decision", key=f"cdbtn_{tid}"):
-                md2 = dict(md)
-                md2.update({
-                    "client_reviewed": True,
-                    "client_comments": client_feedback,
-                    "client_decision": decision,
-                    "client_approved_on": now()
-                })
-                safe_upsert(index, md2)
-                # notify manager / employee
-                notify(md2.get("email"), md2.get("phone"), subject=f"Client Decision: {md2.get('task')}", message=f"Decision: {decision}\nFeedback: {client_feedback}")
-                st.success("Client decision submitted.")
-                safe_rerun()
-    else:
-        st.info("No reviewed tasks loaded yet. Click 'Load Reviewed Tasks'.")
-
-# -----------------------------
-# END
-# -----------------------------
+# ---------------------- Footer ----------------------
+st.markdown("---")
+st.caption("Demo app: replace demo models with production models, secure API keys and use a proper DB for persistence.")
