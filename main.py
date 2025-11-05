@@ -11,6 +11,9 @@ from sklearn.svm import SVC
 from sklearn.cluster import KMeans
 import plotly.express as px
 
+# -----------------------------
+# CONFIG
+# -----------------------------
 st.set_page_config(page_title="AI Task System", layout="wide")
 st.title("AI-Powered Task Management System")
 
@@ -28,36 +31,15 @@ if INDEX_NAME not in [i["name"] for i in pc.list_indexes()]:
     )
 index = pc.Index(INDEX_NAME)
 
-def now(): 
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-def rand_vec(): 
-    return np.random.rand(DIMENSION).tolist()
-
-# -----------------------------
-# AI MODELS
-# -----------------------------
-lin_reg = LinearRegression()
-lin_reg.fit([[0], [50], [100]], [0, 2.5, 5])
-
-log_reg = LogisticRegression()
-log_reg.fit([[0], [40], [80], [100]], [0, 0, 1, 1])
-
-comments = ["excellent work", "needs improvement", "bad performance", "great job", "average"]
-sentiments = [1, 0, 0, 1, 0]
-vectorizer = CountVectorizer()
-X_train = vectorizer.fit_transform(comments)
-svm_clf = SVC()
-svm_clf.fit(X_train, sentiments)
-
-rf = RandomForestClassifier()
-X_rf = np.array([[10, 2], [50, 1], [90, 0], [100, 0]])
-y_rf = [0, 1, 0, 0]
-rf.fit(X_rf, y_rf)
-
 # -----------------------------
 # HELPERS
 # -----------------------------
+def now():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def rand_vec():
+    return np.random.rand(DIMENSION).tolist()
+
 def safe_meta(md):
     clean = {}
     for k, v in md.items():
@@ -84,6 +66,27 @@ def fetch_all():
         return pd.DataFrame()
 
 # -----------------------------
+# AI MODELS
+# -----------------------------
+lin_reg = LinearRegression()
+lin_reg.fit([[0], [50], [100]], [0, 2.5, 5])
+
+log_reg = LogisticRegression()
+log_reg.fit([[0], [40], [80], [100]], [0, 0, 1, 1])
+
+comments = ["excellent work", "needs improvement", "bad performance", "great job", "average"]
+sentiments = [1, 0, 0, 1, 0]
+vectorizer = CountVectorizer()
+X_train = vectorizer.fit_transform(comments)
+svm_clf = SVC()
+svm_clf.fit(X_train, sentiments)
+
+rf = RandomForestClassifier()
+X_rf = np.array([[10, 2], [50, 1], [90, 0], [100, 0]])
+y_rf = [0, 1, 0, 0]
+rf.fit(X_rf, y_rf)
+
+# -----------------------------
 # ROLE SELECTION
 # -----------------------------
 role = st.sidebar.selectbox("Login as", ["Manager", "Team Member", "Client", "Admin"])
@@ -96,6 +99,7 @@ if role == "Manager":
     st.header("Manager Dashboard")
     tab1, tab2 = st.tabs(["Assign Task", "Review Client-Approved"])
 
+    # ----- ASSIGN -----
     with tab1:
         with st.form("assign"):
             company = st.text_input("Company Name")
@@ -124,43 +128,43 @@ if role == "Manager":
                 index.upsert([{"id": tid, "values": rand_vec(), "metadata": md}])
                 st.success(f"Task '{task}' assigned to {employee}")
 
+    # ----- REVIEW -----
     with tab2:
         st.subheader("Client-Approved Tasks")
         df = fetch_all()
 
         if not df.empty:
-            df["client_reviewed"] = df["client_reviewed"].apply(lambda x: str(x).strip().lower() in ["true", "1", "yes"])
+            # Normalize booleans
+            df["client_reviewed"] = df["client_reviewed"].apply(
+                lambda x: str(x).strip().lower() in ["true", "1", "yes"]
+            )
             df = df[df["client_reviewed"] == True]
-        else:
-            df = pd.DataFrame()
 
         if df.empty:
-            st.info("No client-approved tasks yet.")
+            st.warning("No client-approved tasks found yet. Approve a task in the Client panel first.")
         else:
             for _, r in df.iterrows():
-                st.markdown(f"**Task:** {r['task']}")
+                st.markdown(f"### {r.get('task', 'Untitled Task')}")
                 st.write(f"Employee: {r.get('employee', '')}")
-                st.write(f"Client Comments: {r.get('client_comments', 'No comments provided')}")
-                marks = st.number_input(f"Marks for {r['task']}", 0.0, 5.0, float(r.get('marks', 0)), step=0.1, key=f"m_{r['_id']}")
-                comments = st.text_area(f"Manager Comments for {r['task']}", key=f"c_{r['_id']}")
+                st.write(f"Client Comments: {r.get('client_comments', 'No comments')}")
 
-                if st.button(f"Finalize Review {r['task']}", key=f"b_{r['_id']}"):
-                    try:
-                        sent_val = int(svm_clf.predict(vectorizer.transform([comments]))[0])
-                        sent = "Positive" if sent_val == 1 else "Negative"
-                        md = safe_meta({
-                            **r,
-                            "marks": marks,
-                            "manager_comments": comments,
-                            "reviewed": True,
-                            "sentiment": sent,
-                            "reviewed_on": now()
-                        })
-                        index.upsert([{"id": r["_id"], "values": rand_vec(), "metadata": md}])
-                        st.success(f"Review finalized for '{r['task']}' ({sent})")
-                        st.experimental_rerun()
-                    except Exception as e:
-                        st.error(f"Error during review: {e}")
+                marks = st.number_input(f"Marks (0–5)", 0.0, 5.0, float(r.get("marks", 0)), step=0.1, key=f"m_{r['_id']}")
+                comments = st.text_area("Manager Comments", key=f"c_{r['_id']}")
+
+                if st.button("Finalize Review", key=f"b_{r['_id']}"):
+                    sent_val = int(svm_clf.predict(vectorizer.transform([comments]))[0])
+                    sent = "Positive" if sent_val == 1 else "Negative"
+                    md = safe_meta({
+                        **r,
+                        "marks": marks,
+                        "manager_comments": comments,
+                        "reviewed": True,
+                        "sentiment": sent,
+                        "reviewed_on": now()
+                    })
+                    index.upsert([{"id": r["_id"], "values": rand_vec(), "metadata": md}])
+                    st.success(f"Review saved for '{r['task']}' ({sent})")
+                    st.experimental_rerun()
 
 # -----------------------------
 # TEAM MEMBER
@@ -171,8 +175,10 @@ elif role == "Team Member":
     employee = st.text_input("Your Name")
 
     if st.button("Load Tasks"):
-        res = index.query(vector=rand_vec(), top_k=500, include_metadata=True,
-                          filter={"company": {"$eq": company}, "employee": {"$eq": employee}})
+        res = index.query(
+            vector=rand_vec(), top_k=500, include_metadata=True,
+            filter={"company": {"$eq": company}, "employee": {"$eq": employee}}
+        )
         st.session_state["tasks"] = [(m.id, m.metadata) for m in res.matches or []]
         st.success(f"Loaded {len(st.session_state['tasks'])} tasks.")
 
@@ -182,8 +188,8 @@ elif role == "Team Member":
             st.subheader(md.get("task"))
             st.write(md.get("description"))
             curr = float(md.get("completion", 0))
-            new = st.slider(f"Completion for {md.get('task')}", 0, 100, int(curr))
-            if st.button(f"Submit {md.get('task')}", key=tid):
+            new = st.slider(f"Completion (%)", 0, 100, int(curr), key=f"s_{tid}")
+            if st.button("Submit Update", key=tid):
                 marks = float(lin_reg.predict([[new]])[0])
                 track = "On Track" if log_reg.predict([[new]])[0] == 1 else "Delayed"
                 miss = rf.predict([[new, 0]])[0]
@@ -197,7 +203,7 @@ elif role == "Team Member":
                     "client_reviewed": False
                 })
                 index.upsert([{"id": tid, "values": rand_vec(), "metadata": md2}])
-                st.success(f"Updated {md.get('task')} ({track}, Risk={md2['deadline_risk']})")
+                st.success(f"Progress updated ({track}, Risk={md2['deadline_risk']})")
 
 # -----------------------------
 # CLIENT
@@ -205,9 +211,12 @@ elif role == "Team Member":
 elif role == "Client":
     st.header("Client Review")
     company = st.text_input("Company Name")
-    if st.button("Load Completed"):
-        res = index.query(vector=rand_vec(), top_k=500, include_metadata=True,
-                          filter={"company": {"$eq": company}, "completion": {"$gte": 95}})
+
+    if st.button("Load Completed Tasks"):
+        res = index.query(
+            vector=rand_vec(), top_k=500, include_metadata=True,
+            filter={"company": {"$eq": company}, "completion": {"$gte": 95}}
+        )
         st.session_state["ctasks"] = [(m.id, m.metadata) for m in res.matches or []]
         st.success(f"Loaded {len(st.session_state['ctasks'])} tasks.")
 
@@ -215,11 +224,17 @@ elif role == "Client":
         st.subheader(md.get("task"))
         st.write(f"Employee: {md.get('employee')}")
         st.write(f"Completion: {md.get('completion')}%")
-        comment = st.text_area(f"Feedback for {md.get('task')}", key=f"c_{tid}")
-        if st.button(f"Approve {md.get('task')}", key=f"approve_{tid}"):
-            md2 = safe_meta({**md, "client_reviewed": True, "client_comments": comment, "client_approved_on": now()})
+        comment = st.text_area("Feedback", key=f"f_{tid}")
+        if st.button("Approve Task", key=f"a_{tid}"):
+            md2 = safe_meta({
+                **md,
+                "client_reviewed": True,
+                "client_comments": comment,
+                "client_approved_on": now()
+            })
             index.upsert([{"id": tid, "values": rand_vec(), "metadata": md2}])
-            st.success(f"Approved {md.get('task')}")
+            st.success(f"Task '{md.get('task')}' approved.")
+            st.experimental_rerun()
 
 # -----------------------------
 # ADMIN
@@ -246,7 +261,6 @@ elif role == "Admin":
         else:
             st.info("Not enough data for clustering (need at least 3 tasks).")
 
-        st.subheader("Summary")
         avg_m = df["marks"].mean()
         avg_c = df["completion"].mean()
         summary = f"Average marks: {avg_m:.2f}, completion: {avg_c:.1f}%. Top performers: {', '.join(top['employee'].tolist())}."
