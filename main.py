@@ -12,7 +12,7 @@ import plotly.express as px
 st.set_page_config(page_title="AI Task Management System", layout="wide")
 st.title("AI-Powered Task Management System")
 
-INDEX_NAME = "task-index"
+INDEX_NAME = "task"
 DIMENSION = 1024
 
 # ---------------- PINECONE INIT ----------------
