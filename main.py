@@ -130,7 +130,10 @@ if role == "Manager":
 
     with tab2:
         df = fetch_all()
-        df = df[df.get("client_reviewed", "").astype(str).str.lower() == "true"]
+        if "client_reviewed" in df.columns:
+            df = df[df["client_reviewed"].astype(str).str.lower() == "true"]
+        else:
+          df = pd.DataFrame()
         if df.empty:
             st.info("No client-approved tasks.")
         else:
