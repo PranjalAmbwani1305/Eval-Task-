@@ -19,7 +19,7 @@ import uuid
 # PAGE CONFIG
 # -----------------------------
 st.set_page_config(page_title="AI Task Management System", layout="wide")
-st.title("🚀 AI-Powered Task Management System")
+st.title("🚀 AI-Powered Task & Performance Management System")
 
 # -----------------------------
 # INITIALIZATION
@@ -146,7 +146,11 @@ current_month = datetime.now().strftime("%B %Y")
 # -----------------------------
 if role == "Manager":
     st.header("👨‍💼 Manager Dashboard")
-    tab1, tab2, tab3 = st.tabs(["Assign Task", "Review Tasks", "Manager Actions & 360°"])
+    tab1, tab2, tab3 = st.tabs([
+        "Assign Task",
+        "Review Tasks",
+        "360° Performance & Reassignment"
+    ])
 
     # --- Assign Task ---
     with tab1:
@@ -202,20 +206,50 @@ if role == "Manager":
                     st.success(f"✅ Review finalized ({sentiment})")
                     safe_rerun()
 
-    # --- 360° ---
+    # --- 360° Performance Overview + Reassignment ---
     with tab3:
-        st.subheader("📈 360° Performance Overview")
+        st.subheader("📈 360° Performance & Reassignment Panel")
         df = fetch_all()
+
         if not df.empty:
             df["marks"] = pd.to_numeric(df["marks"], errors="coerce")
             df["completion"] = pd.to_numeric(df["completion"], errors="coerce")
+
+            # Visualization
             if len(df) >= 3:
                 kmeans = KMeans(n_clusters=3, n_init=10).fit(df[["completion", "marks"]].fillna(0))
                 df["cluster"] = kmeans.labels_
-                st.plotly_chart(px.scatter(df, x="completion", y="marks", color=df["cluster"].astype(str),
-                                           hover_data=["employee", "task"], title="Employee Clusters"))
+                st.plotly_chart(px.scatter(
+                    df, x="completion", y="marks", color=df["cluster"].astype(str),
+                    hover_data=["employee", "task"], title="Employee Performance Clusters"
+                ))
+
             avg_marks = df["marks"].mean()
-            st.info(f"Avg Marks: {avg_marks:.2f}")
+            st.info(f"Average Team Marks: {avg_marks:.2f}")
+
+            # Reassignment
+            st.markdown("### 🔄 Task Reassignment Panel")
+            underperf = df[df["completion"] < 50]
+
+            if underperf.empty:
+                st.success("✅ No underperforming tasks detected.")
+            else:
+                for _, task_row in underperf.iterrows():
+                    st.write(f"**Task:** {task_row['task']} | **Employee:** {task_row['employee']} | Completion: {task_row['completion']}%")
+                    new_emp = st.text_input(f"Reassign '{task_row['task']}' to:", key=f"reassign_{task_row['_id']}")
+                    reason = st.text_area(f"Reason for reassignment ({task_row['task']}):", key=f"reason_{task_row['_id']}")
+                    if st.button(f"Confirm Reassignment ({task_row['task']})", key=f"btn_{task_row['_id']}"):
+                        task_row["employee"] = new_emp
+                        task_row["reassigned_reason"] = reason
+                        task_row["reassigned_on"] = now()
+                        safe_upsert(index, task_row)
+                        send_notification(
+                            target_email=task_row.get("email"),
+                            subject="Task Reassignment Notice",
+                            msg=f"Your task '{task_row['task']}' has been reassigned to {new_emp}. Reason: {reason}"
+                        )
+                        st.success(f"✅ Task '{task_row['task']}' reassigned to {new_emp}.")
+                        safe_rerun()
 
 # -----------------------------
 # TEAM MEMBER
