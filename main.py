@@ -31,8 +31,11 @@ if INDEX_NAME not in [i["name"] for i in pc.list_indexes()]:
     )
 index = pc.Index(INDEX_NAME)
 
-def now(): return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-def rand_vec(): return np.random.rand(DIMENSION).tolist()
+def now(): 
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def rand_vec(): 
+    return np.random.rand(DIMENSION).tolist()
 
 # -----------------------------
 # SIMPLE AI MODELS
@@ -164,7 +167,7 @@ if role == "Manager":
                     comments = st.text_area(f"Boss Comments for {r['task']}", key=f"boss_cmt_{r['_id']}")
                     approve = st.radio(f"Approve Task {r['task']}?", ["Yes", "No"], key=f"boss_app_{r['_id']}")
 
-                    if st.button(f"Finalize Review for {r['task']}", key=f"final_{r['_id']}"):
+                    if st.button(f"✅ Finalize Review for {r['task']}", key=f"final_{r['_id']}"):
                         sentiment_val = int(svm_clf.predict(vectorizer.transform([comments]))[0])
                         sentiment = "Positive" if sentiment_val == 1 else "Negative"
 
@@ -181,6 +184,11 @@ if role == "Manager":
 
                         index.upsert([{"id": r["_id"], "values": rand_vec(), "metadata": md}])
                         st.success(f"Review finalized for {r['task']} ({sentiment}) — Boss Set {adjusted_completion}%.")
+
+                        # 🔁 Auto refresh to show new data
+                        if "manager_df" in st.session_state:
+                            del st.session_state["manager_df"]
+                        st.rerun()
 
 # -----------------------------
 # TEAM MEMBER
