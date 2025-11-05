@@ -1,5 +1,5 @@
 import streamlit as st
-from pinecone import Pinecone
+from pinecone import Pinecone, ServerlessSpec
 import numpy as np
 import pandas as pd
 import uuid
@@ -14,30 +14,34 @@ import plotly.express as px
 # -----------------------------
 # CONFIG & INIT
 # -----------------------------
-st.set_page_config(page_title="AI-Powered Task Management System", layout="wide")
+st.set_page_config(page_title="AI Task System", layout="wide")
 st.title("AI-Powered Task Management System")
 
-# ✅ Secure API key loading
 PINECONE_API_KEY = st.secrets["PINECONE_API_KEY"]
-
 pc = Pinecone(api_key=PINECONE_API_KEY)
 INDEX_NAME = "task"
 DIMENSION = 1024
 
-# ✅ Connect to existing index (don’t delete or recreate)
+if INDEX_NAME not in [i["name"] for i in pc.list_indexes()]:
+    pc.create_index(
+        name=INDEX_NAME,
+        dimension=DIMENSION,
+        metric="cosine",
+        spec=ServerlessSpec(cloud="aws", region="us-east-1")
+    )
 index = pc.Index(INDEX_NAME)
 
-def now():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-def rand_vec():
-    return np.random.rand(DIMENSION).tolist()
+def now(): return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+def rand_vec(): return np.random.rand(DIMENSION).tolist()
 
 # -----------------------------
 # SIMPLE AI MODELS
 # -----------------------------
-lin_reg = LinearRegression().fit([[0], [50], [100]], [0, 2.5, 5])
-log_reg = LogisticRegression().fit([[0], [40], [80], [100]], [0, 0, 1, 1])
+lin_reg = LinearRegression()
+lin_reg.fit([[0], [50], [100]], [0, 2.5, 5])
+
+log_reg = LogisticRegression()
+log_reg.fit([[0], [40], [80], [100]], [0, 0, 1, 1])
 
 comments = ["excellent work", "needs improvement", "bad performance", "great job", "average"]
 sentiments = [1, 0, 0, 1, 0]
@@ -47,7 +51,9 @@ svm_clf = SVC()
 svm_clf.fit(X_train, sentiments)
 
 rf = RandomForestClassifier()
-rf.fit(np.array([[10, 2], [50, 1], [90, 0], [100, 0]]), [0, 1, 0, 0])
+X_rf = np.array([[10, 2], [50, 1], [90, 0], [100, 0]])
+y_rf = [0, 1, 0, 0]
+rf.fit(X_rf, y_rf)
 
 # -----------------------------
 # HELPERS
@@ -84,13 +90,13 @@ role = st.sidebar.selectbox("Login as", ["Manager", "Team Member", "Client", "Ad
 current_month = datetime.now().strftime("%B %Y")
 
 # -----------------------------
-# MANAGER: ASSIGN + REVIEW
+# MANAGER (BOSS)
 # -----------------------------
 if role == "Manager":
-    st.header("Manager Dashboard")
-    tab1, tab2 = st.tabs(["Assign Task", "Review Tasks"])
+    st.header("Manager (Boss) Dashboard")
+    tab1, tab2 = st.tabs(["Assign Task", "Boss Review & Adjustment"])
 
-    # --- Assign Task ---
+    # Assign Task
     with tab1:
         with st.form("assign"):
             company = st.text_input("Company Name")
@@ -113,150 +119,195 @@ if role == "Manager":
                     "completion": 0,
                     "marks": 0,
                     "status": "Assigned",
-                    "manager_reviewed": False,
+                    "reviewed": False,
                     "client_reviewed": False,
                     "assigned_on": now()
                 })
                 index.upsert([{"id": tid, "values": rand_vec(), "metadata": md}])
                 st.success(f"Task '{task}' assigned to {employee}")
 
-    # --- Review Tasks ---
+    # Boss Review Section
     with tab2:
-        df = fetch_all()
+        if st.button("🔄 Refresh Data"):
+            if "manager_df" in st.session_state:
+                del st.session_state["manager_df"]
+
+        if "manager_df" not in st.session_state:
+            st.session_state["manager_df"] = fetch_all()
+
+        df = st.session_state["manager_df"]
+
         if df.empty:
-            st.info("No tasks found.")
+            st.warning("No tasks found in Pinecone.")
         else:
-            df["manager_reviewed"] = df.get("manager_reviewed", False)
-            pending = df[df["manager_reviewed"].astype(str).str.lower() != "true"]
+            df.columns = [c.lower() for c in df.columns]
+            df["completion"] = pd.to_numeric(df.get("completion", 0), errors="coerce").fillna(0)
 
-            if pending.empty:
-                st.info("No tasks pending manager review.")
+            tasks_ready = df[df["completion"] > 0]
+
+            if tasks_ready.empty:
+                st.info("No team-submitted tasks available for boss review.")
             else:
-                for _, r in pending.iterrows():
-                    st.subheader(r["task"])
-                    st.write(f"Employee: {r.get('employee')}")
-                    st.write(f"Completion: {r.get('completion')}%")
-                    st.write(f"Deadline: {r.get('deadline')}")
-                    marks = float(lin_reg.predict([[float(r.get('completion', 0))]])[0])
-                    comments = st.text_area(f"Manager Comments for {r['task']}", key=f"mgr_comments_{r['_id']}")
-                    approve = st.radio(f"Approve {r['task']}?", ["Yes", "No"], key=f"mgr_approve_{r['_id']}")
+                for _, r in tasks_ready.iterrows():
+                    st.markdown(f"### {r['task']}")
+                    st.write(f"**Employee:** {r.get('employee', 'Unknown')}")
+                    st.write(f"**Reported Completion:** {r.get('completion', 0)}%")
+                    st.write(f"**Current Marks:** {r.get('marks', 0):.2f}")
+                    st.write(f"**Deadline Risk:** {r.get('deadline_risk', 'N/A')}")
 
-                    if st.button(f"Finalize Review: {r['task']}", key=f"mgr_finalize_{r['_id']}"):
-                        sent_val = int(svm_clf.predict(vectorizer.transform([comments]))[0])
-                        sent = "Positive" if sent_val == 1 else "Negative"
+                    adjusted_completion = st.slider(
+                        f"Adjust Completion % for {r['task']}",
+                        0, 100, int(r.get("completion", 0)), key=f"adj_{r['_id']}"
+                    )
+                    adjusted_marks = float(lin_reg.predict([[adjusted_completion]])[0])
+
+                    comments = st.text_area(f"Boss Comments for {r['task']}", key=f"boss_cmt_{r['_id']}")
+                    approve = st.radio(f"Approve Task {r['task']}?", ["Yes", "No"], key=f"boss_app_{r['_id']}")
+
+                    if st.button(f"Finalize Review for {r['task']}", key=f"final_{r['_id']}"):
+                        sentiment_val = int(svm_clf.predict(vectorizer.transform([comments]))[0])
+                        sentiment = "Positive" if sentiment_val == 1 else "Negative"
+
                         md = safe_meta({
                             **r,
-                            "marks": marks,
+                            "completion": adjusted_completion,
+                            "marks": adjusted_marks,
                             "manager_comments": comments,
-                            "manager_reviewed": True,
-                            "approved": approve,
-                            "sentiment": sent,
+                            "reviewed": True,
+                            "sentiment": sentiment,
+                            "approved_by_boss": approve == "Yes",
                             "reviewed_on": now()
                         })
+
                         index.upsert([{"id": r["_id"], "values": rand_vec(), "metadata": md}])
-                        st.success(f"Review finalized for {r['task']} ({sent})")
+                        st.success(f"Review finalized for {r['task']} ({sentiment}) — Boss Set {adjusted_completion}%.")
 
 # -----------------------------
-# TEAM MEMBER DASHBOARD
+# TEAM MEMBER
 # -----------------------------
 elif role == "Team Member":
-    st.header("Team Member Dashboard")
+    st.header("Team Member Progress Update")
     company = st.text_input("Company")
     employee = st.text_input("Your Name")
 
-    if st.button("Load Tasks"):
-        res = index.query(vector=rand_vec(), top_k=500, include_metadata=True)
-        all_tasks = [(m.id, m.metadata) for m in res.matches or []]
-        tasks = [(tid, md) for tid, md in all_tasks if md.get("company") == company and md.get("employee") == employee]
-        st.session_state["tasks"] = tasks
-        st.success(f"Loaded {len(tasks)} tasks.")
+    if st.button("🔄 Load My Tasks"):
+        res = index.query(vector=rand_vec(), top_k=500, include_metadata=True,
+                          filter={"company": {"$eq": company}, "employee": {"$eq": employee}})
+        st.session_state["tasks"] = [(m.id, m.metadata) for m in res.matches or []]
+        st.success(f"Loaded {len(st.session_state['tasks'])} tasks.")
 
-    tasks = st.session_state.get("tasks", [])
-    if tasks:
-        for tid, md in tasks:
-            st.subheader(md.get("task"))
-            st.write(md.get("description"))
-            curr = float(md.get("completion", 0))
-            new = st.slider(f"Completion for {md.get('task')}", 0, 100, int(curr), key=f"slider_{tid}")
-            if st.button(f"Submit {md.get('task')}", key=f"submit_{tid}"):
-                marks = float(lin_reg.predict([[new]])[0])
-                track = "On Track" if log_reg.predict([[new]])[0] == 1 else "Delayed"
-                risk = "High" if rf.predict([[new, 0]])[0] else "Low"
-                md2 = safe_meta({
-                    **md,
-                    "completion": new,
-                    "marks": marks,
-                    "status": track,
-                    "deadline_risk": risk,
-                    "submitted_on": now()
-                })
-                index.upsert([{"id": tid, "values": rand_vec(), "metadata": md2}])
-                st.success(f"Updated {md.get('task')} ({track}, Risk={risk})")
+    for tid, md in st.session_state.get("tasks", []):
+        st.subheader(md.get("task"))
+        st.write(md.get("description"))
+        curr = float(md.get("completion", 0))
+        new = st.slider(f"Completion for {md.get('task')}", 0, 100, int(curr))
+        if st.button(f"Submit {md.get('task')}", key=tid):
+            marks = float(lin_reg.predict([[new]])[0])
+            track = "On Track" if log_reg.predict([[new]])[0] == 1 else "Delayed"
+            miss = rf.predict([[new, 0]])[0]
+            md2 = safe_meta({
+                **md,
+                "completion": new,
+                "marks": marks,
+                "status": track,
+                "deadline_risk": "High" if miss else "Low",
+                "submitted_on": now(),
+                "client_reviewed": False
+            })
+            index.upsert([{"id": tid, "values": rand_vec(), "metadata": md2}])
+            st.success(f"Updated {md.get('task')} ({track}, Risk={md2['deadline_risk']})")
 
 # -----------------------------
-# CLIENT DASHBOARD
+# CLIENT
 # -----------------------------
 elif role == "Client":
-    st.header("Client Dashboard")
+    st.header("Client Review")
     company = st.text_input("Company Name")
 
-    if st.button("Load Manager-Reviewed Tasks"):
-        df = fetch_all()
-        if not df.empty:
-            df["manager_reviewed"] = df.get("manager_reviewed", False)
-            df = df[(df["company"] == company) & (df["manager_reviewed"].astype(str).str.lower() == "true")]
-            st.session_state["client_tasks"] = df
-            st.success(f"Loaded {len(df)} tasks.")
+    if st.button("🔄 Load Completed Tasks"):
+        res = index.query(vector=rand_vec(), top_k=500, include_metadata=True,
+                          filter={"company": {"$eq": company}, "reviewed": {"$eq": True}})
+        st.session_state["ctasks"] = [(m.id, m.metadata) for m in res.matches or []]
+        st.success(f"Loaded {len(st.session_state['ctasks'])} tasks.")
 
-    if "client_tasks" in st.session_state:
-        df = st.session_state["client_tasks"]
-        if not df.empty:
-            for _, r in df.iterrows():
-                st.subheader(r["task"])
-                st.write(f"Employee: {r['employee']}")
-                st.write(f"Completion: {r['completion']}%")
-                st.write(f"Marks: {r['marks']}")
-                comment = st.text_area(f"Client Comments for {r['task']}", key=f"client_comment_{r['_id']}")
-                approve = st.radio(f"Approve {r['task']}?", ["Yes", "No"], key=f"client_approve_{r['_id']}")
-                if st.button(f"Submit Review for {r['task']}", key=f"client_submit_{r['_id']}"):
-                    md2 = safe_meta({
-                        **r,
-                        "client_reviewed": True,
-                        "client_approved": approve,
-                        "client_comments": comment,
-                        "client_reviewed_on": now()
-                    })
-                    index.upsert([{"id": r["_id"], "values": rand_vec(), "metadata": md2}])
-                    st.success(f"Client review submitted for {r['task']}")
+    for tid, md in st.session_state.get("ctasks", []):
+        st.subheader(md.get("task"))
+        st.write(f"Employee: {md.get('employee')}")
+        st.write(f"Final Completion: {md.get('completion')}%")
+        st.write(f"Boss-Assigned Marks: {md.get('marks')}")
+        comment = st.text_area(f"Feedback for {md.get('task')}", key=f"c_{tid}")
+        if st.button(f"Approve {md.get('task')}", key=f"approve_{tid}"):
+            md2 = safe_meta({
+                **md,
+                "client_reviewed": True,
+                "client_comments": comment,
+                "client_approved_on": now()
+            })
+            index.upsert([{"id": tid, "values": rand_vec(), "metadata": md2}])
+            st.success(f"Approved {md.get('task')}")
 
 # -----------------------------
-# ADMIN DASHBOARD
+# ADMIN
 # -----------------------------
 elif role == "Admin":
     st.header("Admin Dashboard")
-    df = fetch_all()
+
+    if st.button("🔄 Refresh Data"):
+        if "admin_df" in st.session_state:
+            del st.session_state["admin_df"]
+
+    if "admin_df" not in st.session_state:
+        st.session_state["admin_df"] = fetch_all()
+
+    df = st.session_state["admin_df"]
+
     if df.empty:
-        st.warning("No tasks found.")
+        st.warning("No data found.")
     else:
         df["marks"] = pd.to_numeric(df["marks"], errors="coerce")
         df["completion"] = pd.to_numeric(df["completion"], errors="coerce")
 
-        st.subheader("Top Employees by Average Marks")
-        top = df.groupby("employee")["marks"].mean().reset_index().sort_values("marks", ascending=False).head(5)
+        st.subheader("Top Employees by Marks")
+        top = (
+            df.groupby("employee")["marks"]
+            .mean()
+            .reset_index()
+            .sort_values("marks", ascending=False)
+            .head(5)
+        )
         st.dataframe(top)
 
         st.subheader("K-Means Clustering (Performance)")
-        valid_df = df[["completion", "marks"]].fillna(0)
-        n_clusters = min(3, len(valid_df))
-        if n_clusters > 1:
-            km = KMeans(n_clusters=n_clusters, n_init="auto").fit(valid_df)
+        if len(df) >= 1:
+            n_clusters = min(3, len(df))
+            km = KMeans(n_clusters=n_clusters, n_init=10).fit(
+                df[["completion", "marks"]].fillna(0)
+            )
             df["cluster"] = km.labels_
-            st.plotly_chart(px.scatter(df, x="completion", y="marks", color=df["cluster"].astype(str),
-                                       hover_data=["employee", "task"], title="Employee Task Clusters"))
+            st.plotly_chart(
+                px.scatter(
+                    df,
+                    x="completion",
+                    y="marks",
+                    color=df["cluster"].astype(str),
+                    hover_data=["employee", "task"],
+                    title="Employee Task Clusters",
+                )
+            )
+        else:
+            st.info("Not enough data for clustering.")
 
-        st.subheader("Summary")
         avg_m = df["marks"].mean()
         avg_c = df["completion"].mean()
-        st.info(f"Average Marks: {avg_m:.2f}, Average Completion: {avg_c:.1f}%")
+        summary = (
+            f"Average marks: {avg_m:.2f}, completion: {avg_c:.1f}%. "
+            f"Top performers: {', '.join(top['employee'].tolist())}."
+        )
+        st.info(summary)
 
-        st.download_button("Download All Tasks (CSV)", df.to_csv(index=False), "tasks.csv", "text/csv")
+        st.download_button(
+            "Download All Tasks (CSV)",
+            df.to_csv(index=False),
+            "tasks.csv",
+            "text/csv",
+        )
