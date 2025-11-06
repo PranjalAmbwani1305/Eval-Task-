@@ -106,18 +106,12 @@ def send_notification(target_email=None, phone=None, subject="Update", msg="Task
 # -----------------------------
 lin_reg = LinearRegression()
 lin_reg.fit([[0], [50], [100]], [0, 2.5, 5])
-
 log_reg = LogisticRegression()
 log_reg.fit([[0], [40], [80], [100]], [0, 0, 1, 1])
-
 vectorizer = CountVectorizer()
-X_train = vectorizer.fit_transform([
-    "excellent work", "needs improvement",
-    "bad performance", "great job", "average"
-])
+X_train = vectorizer.fit_transform(["excellent work", "needs improvement", "bad performance", "great job", "average"])
 svm_clf = SVC()
 svm_clf.fit(X_train, [1, 0, 0, 1, 0])
-
 rf = RandomForestClassifier()
 rf.fit(np.array([[10, 2], [50, 1], [90, 0], [100, 0]]), [0, 1, 0, 0])
 
@@ -144,7 +138,7 @@ role = st.sidebar.selectbox("Login as", ["Manager", "Team Member", "Client"])
 current_month = datetime.now().strftime("%B %Y")
 
 # -----------------------------
-# MANAGER
+# MANAGER DASHBOARD
 # -----------------------------
 if role == "Manager":
     st.header("👨‍💼 Manager Dashboard")
@@ -180,7 +174,7 @@ if role == "Manager":
                     msg=f"Hello {employee}, you have been assigned a new task: {task}\nDeadline: {deadline}\nDescription: {desc}")
                 st.success(f"✅ Task '{task}' assigned to {employee}")
 
-    # --- Review Tasks (Filtered) ---
+    # --- Review Tasks (Filter by Company & Employee) ---
     with tab2:
         st.subheader("🔍 Review Tasks by Employee and Company")
         company = st.text_input("Enter Company Name to Review")
@@ -261,7 +255,6 @@ if role == "Manager":
     # --- Managerial Actions ---
     with tab4:
         st.subheader("⚙️ Managerial Actions & Approvals")
-        st.write("Perform quick management decisions:")
         st.markdown("""
         - Task reassignments or escalations  
         - Approve leave / overtime / deliverables  
@@ -270,7 +263,7 @@ if role == "Manager":
         """)
 
 # -----------------------------
-# TEAM MEMBER
+# TEAM MEMBER PORTAL
 # -----------------------------
 elif role == "Team Member":
     st.header("👷 Team Member Portal")
@@ -306,32 +299,49 @@ elif role == "Team Member":
     # --- AI Feedback Summarization ---
     with tab2:
         st.subheader("🧠 AI Feedback Summarization")
-        company = st.text_input("Company Name (for summary)")
-        employee = st.text_input("Your Name (for summary)")
-        feedbacks = st.text_area("Paste feedback text below:")
-        if st.button("Analyze Feedback"):
-            if feedbacks.strip():
-                blob = TextBlob(feedbacks)
+        company = st.text_input("🏢 Company Name (for summary)")
+        employee = st.text_input("👤 Your Name (for summary)")
+        feedback_text = st.text_area("💬 Paste feedback text below:")
+
+        if st.button("🔍 Analyze Feedback"):
+            if feedback_text.strip():
+                blob = TextBlob(feedback_text)
                 polarity = blob.sentiment.polarity
+                subjectivity = blob.sentiment.subjectivity
+
                 if polarity > 0.1:
                     sentiment = "✅ Overall Positive Feedback"
+                    emoji = "😄"
+                    advice = "Great job! Keep maintaining consistency and communication."
                 elif polarity < -0.1:
                     sentiment = "⚠️ Overall Negative Feedback"
+                    emoji = "😟"
+                    advice = "Consider addressing pain points or communication gaps with your manager."
                 else:
                     sentiment = "💬 Neutral Feedback"
+                    emoji = "😐"
+                    advice = "Feedback seems balanced. Continue monitoring improvements."
 
+                st.markdown("---")
+                st.markdown(f"### {emoji} Sentiment Analysis Result")
+                st.markdown(f"**Sentiment:** {sentiment}")
+                st.markdown(f"**Polarity Score:** `{polarity:.3f}`  |  **Subjectivity:** `{subjectivity:.3f}`")
                 st.progress((polarity + 1) / 2)
-                st.markdown(f"### Sentiment: {sentiment}")
-                st.markdown(f"**Summary:** {blob.noun_phrases}")
-                if "negative" in sentiment.lower():
-                    st.info("🛠 Suggestion: Review integration issues or communication gaps.")
-                elif "positive" in sentiment.lower():
-                    st.success("🌟 Great job! Keep maintaining this performance.")
+
+                keywords = list(blob.noun_phrases)
+                if keywords:
+                    st.markdown(f"**Key Themes:** {', '.join(keywords)}")
                 else:
-                    st.warning("📊 Mixed sentiment detected. Continue gathering feedback.")
+                    st.markdown("**Key Themes:** No specific keywords detected.")
+
+                st.info(f"💡 Suggestion: {advice}")
+                summary = " ".join(keywords[:5]) if keywords else "General performance feedback."
+                st.success(f"📘 Summary for {employee or 'Employee'} ({company or 'Company'}): {summary}")
+            else:
+                st.warning("⚠️ Please paste some feedback text to analyze.")
 
 # -----------------------------
-# CLIENT
+# CLIENT REVIEW
 # -----------------------------
 elif role == "Client":
     st.header("🧾 Client Review")
