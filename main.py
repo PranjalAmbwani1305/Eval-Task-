@@ -106,12 +106,18 @@ def send_notification(target_email=None, phone=None, subject="Update", msg="Task
 # -----------------------------
 lin_reg = LinearRegression()
 lin_reg.fit([[0], [50], [100]], [0, 2.5, 5])
+
 log_reg = LogisticRegression()
 log_reg.fit([[0], [40], [80], [100]], [0, 0, 1, 1])
+
 vectorizer = CountVectorizer()
-X_train = vectorizer.fit_transform(["excellent work", "needs improvement", "bad performance", "great job", "average"])
+X_train = vectorizer.fit_transform([
+    "excellent work", "needs improvement",
+    "bad performance", "great job", "average"
+])
 svm_clf = SVC()
 svm_clf.fit(X_train, [1, 0, 0, 1, 0])
+
 rf = RandomForestClassifier()
 rf.fit(np.array([[10, 2], [50, 1], [90, 0], [100, 0]]), [0, 1, 0, 0])
 
@@ -174,30 +180,62 @@ if role == "Manager":
                     msg=f"Hello {employee}, you have been assigned a new task: {task}\nDeadline: {deadline}\nDescription: {desc}")
                 st.success(f"✅ Task '{task}' assigned to {employee}")
 
-    # --- Review Tasks ---
+    # --- Review Tasks (Filtered) ---
     with tab2:
-        df = fetch_all()
-        if df.empty:
-            st.warning("No tasks found.")
-        else:
-            for _, r in df.iterrows():
-                st.markdown(f"### {r.get('task', 'Unnamed Task')}")
-                adj = st.slider(f"Adjust Completion ({r.get('employee', '')})", 0, 100, int(r.get("completion", 0)))
-                adj_marks = float(lin_reg.predict([[adj]])[0])
-                comments = st.text_area(f"Manager Comments ({r.get('task', '')})", key=f"c_{r['_id']}")
-                approve = st.radio(f"Approve {r.get('task', '')}?", ["Yes", "No"], key=f"a_{r['_id']}")
-                if st.button(f"Finalize Review {r.get('task', '')}", key=f"f_{r['_id']}"):
-                    sentiment_val = int(svm_clf.predict(vectorizer.transform([comments]))[0])
-                    sentiment = "Positive" if sentiment_val == 1 else "Negative"
-                    md = {**r, "completion": adj, "marks": adj_marks,
-                          "reviewed": True, "sentiment": sentiment,
-                          "approved_by_boss": approve == "Yes", "reviewed_on": now()}
-                    safe_upsert(index, md)
-                    send_notification(r.get("email"), r.get("phone"),
-                        subject=f"Task Review: {r.get('task')}",
-                        msg=f"Your task '{r.get('task')}' was reviewed.\nCompletion: {adj}%\nMarks: {adj_marks:.2f}\nSentiment: {sentiment}")
-                    st.success(f"✅ Review finalized ({sentiment})")
-                    safe_rerun()
+        st.subheader("🔍 Review Tasks by Employee and Company")
+        company = st.text_input("Enter Company Name to Review")
+        employee = st.text_input("Enter Employee Name to Review")
+
+        if st.button("Load Tasks"):
+            if company and employee:
+                try:
+                    res = index.query(
+                        vector=rand_vec(),
+                        top_k=500,
+                        include_metadata=True,
+                        filter={"company": {"$eq": company}, "employee": {"$eq": employee}}
+                    )
+                    st.session_state["review_tasks"] = [(m.id, m.metadata) for m in res.matches or []]
+                    st.success(f"Loaded {len(st.session_state['review_tasks'])} tasks for {employee} at {company}.")
+                except Exception as e:
+                    st.warning(f"⚠️ Error fetching tasks: {e}")
+            else:
+                st.warning("Please enter both Company and Employee names to load tasks.")
+
+        for tid, r in st.session_state.get("review_tasks", []):
+            st.markdown(f"### 📝 {r.get('task', 'Unnamed Task')}")
+            adj = st.slider(f"Adjust Completion ({r.get('employee', '')})", 0, 100, int(r.get("completion", 0)))
+            adj_marks = float(lin_reg.predict([[adj]])[0])
+            comments = st.text_area(f"Manager Comments ({r.get('task', '')})", key=f"c_{tid}")
+            approve = st.radio(f"Approve {r.get('task', '')}?", ["Yes", "No"], key=f"a_{tid}")
+
+            if st.button(f"Finalize Review {r.get('task', '')}", key=f"f_{tid}"):
+                sentiment_val = int(svm_clf.predict(vectorizer.transform([comments]))[0])
+                sentiment = "Positive" if sentiment_val == 1 else "Negative"
+                md = {
+                    **r,
+                    "completion": adj,
+                    "marks": adj_marks,
+                    "reviewed": True,
+                    "sentiment": sentiment,
+                    "approved_by_boss": approve == "Yes",
+                    "reviewed_on": now()
+                }
+                safe_upsert(index, md)
+                send_notification(
+                    r.get("email"),
+                    r.get("phone"),
+                    subject=f"Task Review: {r.get('task')}",
+                    msg=(
+                        f"Hello {r.get('employee')},\n\n"
+                        f"Your task '{r.get('task')}' has been reviewed.\n"
+                        f"Completion: {adj}%\nMarks: {adj_marks:.2f}\n"
+                        f"Sentiment: {sentiment}\nApproval: {approve}\n\n"
+                        f"Regards,\n{company} Management"
+                    )
+                )
+                st.success(f"✅ Review finalized for {r.get('task')} ({sentiment})")
+                safe_rerun()
 
     # --- 360° Overview ---
     with tab3:
@@ -223,11 +261,13 @@ if role == "Manager":
     # --- Managerial Actions ---
     with tab4:
         st.subheader("⚙️ Managerial Actions & Approvals")
-        st.markdown("Perform quick management decisions:")
-        st.write("• Task reassignments or escalations")
-        st.write("• Approve leave / overtime / deliverables")
-        st.write("• Send appreciation / warning / suggestion notes")
-        st.write("• Generate 360° performance summaries for appraisal cycles")
+        st.write("Perform quick management decisions:")
+        st.markdown("""
+        - Task reassignments or escalations  
+        - Approve leave / overtime / deliverables  
+        - Send appreciation / warning / suggestion notes  
+        - Generate 360° performance summaries for appraisal cycles  
+        """)
 
 # -----------------------------
 # TEAM MEMBER
