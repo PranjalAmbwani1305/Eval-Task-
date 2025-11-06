@@ -42,7 +42,7 @@ if not PINECONE_API_KEY:
     st.stop()
 
 pc = Pinecone(api_key=PINECONE_API_KEY)
-INDEX_NAME = "project-task-management" # Updated index name for broader scope
+INDEX_NAME = "task" # Updated index name for broader scope
 DIMENSION = 1024
 
 if INDEX_NAME not in [i["name"] for i in pc.list_indexes()]:
