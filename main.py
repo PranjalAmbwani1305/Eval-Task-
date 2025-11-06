@@ -19,9 +19,9 @@ st.title("🤖 AI-Driven Employee Management System")
 
 # Connect to Pinecone
 pinecone.init(api_key="YOUR_PINECONE_API_KEY", environment="gcp-starter")
-index_name = "ai-task-system"
+index_name = "task"
 if index_name not in pinecone.list_indexes():
-    pinecone.create_index(index_name, dimension=128)
+    pinecone.create_index(index_name, dimension=1024)
 index = pinecone.Index(index_name)
 
 # ----------------------- UTILITIES -----------------------
