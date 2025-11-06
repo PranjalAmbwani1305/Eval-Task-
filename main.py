@@ -1,6 +1,5 @@
 import streamlit as st
 from pinecone import Pinecone, ServerlessSpec
-import openai
 import pandas as pd
 import numpy as np
 import uuid
@@ -14,16 +13,16 @@ import plotly.express as px
 # CONFIG
 # -----------------------------
 st.set_page_config(page_title="AI Task Management System", layout="wide")
-st.title("AI-Powered Task Management System")
+st.title("AI Task Management System")
 
 # -----------------------------
 # INIT
 # -----------------------------
-openai.api_key = st.secrets["OPENAI_API_KEY"]
-pc = Pinecone(api_key=st.secrets["PINECONE_API_KEY"])
+PINECONE_API_KEY = st.secrets["PINECONE_API_KEY"]
 
-INDEX_NAME = "task-management"
-DIMENSION = 1536
+pc = Pinecone(api_key=PINECONE_API_KEY)
+INDEX_NAME = "taskt"
+DIMENSION = 1024
 
 if INDEX_NAME not in [i["name"] for i in pc.list_indexes()]:
     pc.create_index(
@@ -35,62 +34,55 @@ if INDEX_NAME not in [i["name"] for i in pc.list_indexes()]:
 
 index = pc.Index(INDEX_NAME)
 
-
-def now(): return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
+def now():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 # -----------------------------
-# EMBEDDINGS & DB HELPERS
+# LOCAL EMBEDDINGS (NO OPENAI)
 # -----------------------------
-def embed_text(text):
-    """Generate text embedding using OpenAI"""
-    if not text:
-        return [0.0] * DIMENSION
-    response = openai.embeddings.create(
-        model="text-embedding-3-small",
-        input=text
-    )
-    return response.data[0].embedding
+def simple_embed(text):
+    """A lightweight hash-based embedding."""
+    np.random.seed(abs(hash(text)) % (2**32))
+    return np.random.rand(DIMENSION).tolist()
 
-
+# -----------------------------
+# DB HELPERS
+# -----------------------------
 def store_task(task):
     """Save task in Pinecone"""
     try:
-        vec = embed_text(f"{task['task']} {task.get('description','')} {task.get('comments','')}")
-        index.upsert([
-            {"id": task["_id"], "values": vec, "metadata": task}
-        ])
+        vec = simple_embed(f"{task['task']} {task.get('description','')} {task.get('comments','')}")
+        index.upsert([{"id": task["_id"], "values": vec, "metadata": task}])
     except Exception as e:
         st.error(f"Failed to store in Pinecone: {e}")
-
 
 def fetch_tasks(company=None, employee=None):
     """Fetch all tasks"""
     try:
-        res = index.query(vector=[0]*DIMENSION, top_k=200, include_metadata=True)
+        res = index.query(vector=np.random.rand(DIMENSION).tolist(), top_k=200, include_metadata=True)
         rows = [m.metadata for m in res.matches if "metadata" in m]
         df = pd.DataFrame(rows)
-        if company and "company" in df.columns:
-            df = df[df["company"].str.lower() == company.lower()]
-        if employee and "employee" in df.columns:
-            df = df[df["employee"].str.lower() == employee.lower()]
+        if not df.empty:
+            if company and "company" in df.columns:
+                df = df[df["company"].str.lower() == company.lower()]
+            if employee and "employee" in df.columns:
+                df = df[df["employee"].str.lower() == employee.lower()]
         return df
     except Exception as e:
         st.warning(f"Unable to fetch tasks: {e}")
         return pd.DataFrame()
 
-
 # -----------------------------
-# AI FEEDBACK SUMMARIZER
+# NLP FEEDBACK SUMMARIZER
 # -----------------------------
 def summarize_feedback(feedback_list):
-    """Summarize text feedback using NLP"""
+    """Summarize text feedback using NLP sentiment"""
     if not feedback_list:
         return "No feedback available."
     full_text = " ".join(feedback_list)
     blob = TextBlob(full_text)
     sentiment = blob.sentiment.polarity
-    summary = " ".join(blob.sentences[:2]) if blob.sentences else full_text[:150]
+    summary = " ".join([str(s) for s in blob.sentences[:2]]) if blob.sentences else full_text[:150]
     if sentiment > 0.2:
         mood = "Overall Positive Feedback."
     elif sentiment < -0.2:
@@ -98,7 +90,6 @@ def summarize_feedback(feedback_list):
     else:
         mood = "Overall Neutral Feedback."
     return f"{mood} Summary: {summary}"
-
 
 # -----------------------------
 # BASIC MODELS
@@ -161,7 +152,7 @@ if role == "Manager":
             st.info("No tasks found.")
         else:
             for _, r in df.iterrows():
-                st.markdown(f"#### {r.get('task', 'Unnamed Task')}")
+                st.markdown(f"### {r.get('task', 'Unnamed Task')}")
                 adj = st.slider(f"Completion ({r.get('employee', '')})", 0, 100, int(r.get("completion", 0)))
                 comments = st.text_area(f"Manager Comments ({r.get('task')})", key=f"c_{r['_id']}")
                 if st.button(f"Finalize Review {r.get('task')}", key=f"f_{r['_id']}"):
@@ -199,7 +190,9 @@ if role == "Manager":
         else:
             for _, r in df.iterrows():
                 st.markdown(f"**Task:** {r.get('task', '')} | **Employee:** {r.get('employee', '')}")
-                action = st.selectbox(f"Action for {r.get('task')}", ["None", "Reassign", "Approve", "Escalate"], key=f"a_{r['_id']}")
+                action = st.selectbox(f"Action for {r.get('task')}",
+                                      ["None", "Reassign", "Approve", "Escalate"],
+                                      key=f"a_{r['_id']}")
                 if action == "Reassign":
                     new_emp = st.text_input("New Employee Name", key=f"new_{r['_id']}")
                     if st.button(f"Confirm Reassign {r.get('task')}", key=f"r_{r['_id']}"):
@@ -263,7 +256,7 @@ elif role == "Client":
         if df.empty:
             st.warning("No completed tasks found.")
         else:
-            df = df[df["status"].str.lower().isin(["completed", "approved"])]
+            df = df[df["status"].str.lower().isin(["completed", "approved", "client approved"])]
             for _, r in df.iterrows():
                 st.markdown(f"### {r['task']}")
                 st.write(f"Employee: {r['employee']}")
