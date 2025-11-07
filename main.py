@@ -7,8 +7,7 @@ from sklearn.cluster import KMeans
 import plotly.express as px
 import pathlib
 
-# ------------- CONFIG -------------
-st.set_page_config(page_title="AI Workforce (Stable)", layout="wide")
+
 st.title("🏢 AI Enterprise Workforce — Stable Edition (Assign / Upload / Meetings)")
 
 # storage dir for uploaded files
