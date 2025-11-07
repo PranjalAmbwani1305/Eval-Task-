@@ -7,31 +7,31 @@ from datetime import date, datetime, timedelta
 from sklearn.cluster import KMeans
 import plotly.express as px
 import pathlib
+import random
 
 # ------------- CONFIG -------------
-st.set_page_config(page_title="AI Workforce (Fixed)", layout="wide")
-st.title("🏢 AI Enterprise Workforce — Fixed Edition (Assign / Upload / Meetings)")
+st.set_page_config(page_title="AI Workforce (Final Stable)", layout="wide")
+st.title("🏢 AI Enterprise Workforce — Final Stable Edition")
 
 # storage dir for uploaded files
 FILE_STORE_DIR = os.path.join(os.getcwd(), "ai_workforce_files")
 pathlib.Path(FILE_STORE_DIR).mkdir(parents=True, exist_ok=True)
 
-# ------------- PINECONE (optional) -------------
+# ------------- Optional Pinecone (best-effort) -------------
 USE_PINECONE = False
 index = None
 DIMENSION = 1024
-
 try:
     if "PINECONE_API_KEY" in st.secrets:
         from pinecone import Pinecone
         pc = Pinecone(api_key=st.secrets["PINECONE_API_KEY"])
-        index = pc.Index("task")  # may fail if index doesn't exist; we catch below
+        index = pc.Index("task")
         USE_PINECONE = True
 except Exception:
     USE_PINECONE = False
     index = None
 
-# ------------- SESSION STORAGE INITIALIZATION -------------
+# ------------- Session storage initialization -------------
 if "store_df" not in st.session_state:
     st.session_state.store_df = pd.DataFrame(
         columns=[
@@ -47,6 +47,7 @@ if "store_df" not in st.session_state:
 def local_df():
     return st.session_state.store_df
 
+# ------------- File saving helper -------------
 def save_uploaded_file(uploaded_file, prefix="file"):
     if uploaded_file is None:
         return None
@@ -60,7 +61,7 @@ def save_uploaded_file(uploaded_file, prefix="file"):
     except Exception:
         return None
 
-# ------------- SAFE FILTER HELPER (fixes KeyError) -------------
+# ------------- Safe helpers to avoid KeyError -------------
 def filter_by_type(df_obj, rtype):
     """
     Return rows where record_type == rtype.
@@ -76,6 +77,23 @@ def filter_by_type(df_obj, rtype):
         return df_obj[df_obj["record_type"] == rtype].copy()
     except Exception:
         return pd.DataFrame(columns=df_obj.columns)
+
+def safe_column_equal(df_obj, col, value=True):
+    """
+    Return a boolean Series mask: True where df_obj[col] == value.
+    If df_obj is not a DataFrame, return empty Series.
+    If column is missing, return a Series of False (length = len(df_obj)).
+    """
+    if not isinstance(df_obj, pd.DataFrame):
+        return pd.Series(dtype=bool)
+    if df_obj.empty:
+        return pd.Series(False, index=df_obj.index)
+    if col not in df_obj.columns:
+        return pd.Series(False, index=df_obj.index)
+    try:
+        return df_obj[col] == value
+    except Exception:
+        return pd.Series(False, index=df_obj.index)
 
 # ------------- Data API: unified interface to Pinecone or local -------------
 def fetch_all():
@@ -130,14 +148,65 @@ def upsert_records(records):
             pass
     return True
 
-# initial fetch
-df = fetch_all()
+# ------------- Seeder -------------
+def seed_sample_data(n_tasks=5, n_meetings=1):
+    companies = ["TechNova", "InnoSoft", "DataWorks"]
+    departments = ["AI", "DevOps", "Analytics"]
+    employees = ["Aarav", "Diya", "Rohan", "Isha", "Kabir", "Amruta"]
+    sample_tasks = []
+    for i in range(n_tasks):
+        completion = random.choice([10, 30, 55, 70, 90])
+        marks = round(completion * 0.05, 2)
+        rec = {
+            "_id": str(uuid.uuid4()),
+            "record_type": "task",
+            "company": random.choice(companies),
+            "department": random.choice(departments),
+            "employee": random.choice(employees),
+            "task": f"Sample Task {100+i}",
+            "completion": completion,
+            "marks": marks,
+            "status": "On Track" if completion >= 60 else ("Delayed" if completion < 30 else "At Risk"),
+            "deadline": str(date.today() + timedelta(days=random.randint(1, 14))),
+            "priority": random.choice(["Low", "Medium", "High"]),
+            "notes": "Auto-seeded sample task",
+            "attachments": None,
+            "submitted_on": str(datetime.now()),
+            "reviewed": False
+        }
+        sample_tasks.append(rec)
 
-# ------------- Sidebar: role selection -------------
+    sample_meetings = []
+    for i in range(n_meetings):
+        dt = datetime.now() + timedelta(days=random.randint(1,7), hours=random.randint(0,5))
+        meeting = {
+            "_id": str(uuid.uuid4()),
+            "record_type": "meeting",
+            "meeting_title": f"Kickoff {i+1}",
+            "organizer": random.choice(employees),
+            "participants": ", ".join(random.sample(employees, k=3)),
+            "meeting_datetime": dt.isoformat(),
+            "duration_min": 60,
+            "agenda": "Auto-seeded meeting",
+            "attachment": None,
+            "created_on": str(datetime.now())
+        }
+        sample_meetings.append(meeting)
+
+    upsert_records(sample_tasks + sample_meetings)
+    st.success(f"Seeded {n_tasks} tasks and {n_meetings} meetings.")
+
+# ------------- Sidebar seed button and role -------------
+if st.sidebar.button("⚙️ Seed sample data (3 tasks, 1 meeting)"):
+    seed_sample_data(n_tasks=3, n_meetings=1)
+
 st.sidebar.header("Role")
 role = st.sidebar.radio("Choose Role", ["Manager", "Team Member", "Client", "Admin"])
 
-# ------------- Helper utilities -------------
+# initial fetch
+df = fetch_all()
+
+# ------------- Utilities -------------
 def compute_marks_and_status(completion):
     try:
         comp = float(completion)
@@ -147,13 +216,13 @@ def compute_marks_and_status(completion):
     status = "On Track" if comp >= 60 else ("Delayed" if comp < 30 else "At Risk")
     return marks, status
 
-# ------------- MANAGER UI -------------
+# ------------- MANAGER -------------
 if role == "Manager":
     st.header("👨‍💼 Manager Dashboard — Assign / Meetings")
 
     tabs = st.tabs(["Assign / Reassign", "Review Tasks", "Meetings", "Overview"])
 
-    # ---------- Assign / Reassign ----------
+    # Assign / Reassign
     with tabs[0]:
         st.subheader("📝 Create or Update Task")
         mode = st.radio("Mode", ["Create New Task", "Update / Reassign Existing"], index=0)
@@ -229,14 +298,15 @@ if role == "Manager":
                     st.success("Task updated")
                     df = fetch_all()
 
-    # ---------- Review Tasks ----------
+    # Review Tasks
     with tabs[1]:
         st.subheader("🧾 Review Pending Tasks")
         df_tasks = filter_by_type(df, "task")
         if df_tasks.empty:
             st.info("No tasks.")
         else:
-            pending = df_tasks[df_tasks.get("reviewed") != True]
+            reviewed_mask = safe_column_equal(df_tasks, "reviewed", True)
+            pending = df_tasks[~reviewed_mask]
             if pending.empty:
                 st.success("No pending tasks.")
             else:
@@ -257,7 +327,7 @@ if role == "Manager":
                         df = fetch_all()
                         st.experimental_rerun()
 
-    # ---------- Meetings ----------
+    # Meetings
     with tabs[2]:
         st.subheader("📅 Meetings (create / view / cancel)")
         mode_meet = st.radio("Mode", ["Schedule New Meeting", "View Meetings"], index=0)
@@ -308,7 +378,7 @@ if role == "Manager":
                         df = fetch_all()
                         st.experimental_rerun()
 
-    # ---------- Overview ----------
+    # Overview
     with tabs[3]:
         st.subheader("📊 Quick Overview")
         df_tasks = filter_by_type(df, "task")
@@ -316,7 +386,7 @@ if role == "Manager":
             st.info("No tasks to show")
         else:
             st.metric("Total Tasks", len(df_tasks))
-            st.metric("Pending Review", int((df_tasks.get("reviewed") != True).sum()))
+            st.metric("Pending Review", int((~safe_column_equal(df_tasks, "reviewed", True)).sum()))
             try:
                 num_df = df_tasks.dropna(subset=["marks", "completion"]).copy()
                 num_df["marks"] = pd.to_numeric(num_df["marks"], errors="coerce")
@@ -331,7 +401,7 @@ if role == "Manager":
             except Exception:
                 st.info("Visualization currently not available")
 
-# ------------- TEAM MEMBER UI -------------
+# ------------- TEAM MEMBER -------------
 elif role == "Team Member":
     st.header("👷 Team Member — Update / Upload / Meetings")
 
@@ -414,7 +484,7 @@ elif role == "Team Member":
                     st.success("Work attached to meeting")
                     df = fetch_all()
 
-# ------------- CLIENT UI -------------
+# ------------- CLIENT -------------
 elif role == "Client":
     st.header("🧾 Client Portal — Approve / View")
 
@@ -437,18 +507,22 @@ elif role == "Client":
     with tabs[1]:
         st.subheader("Approve Reviewed Tasks")
         df_tasks = filter_by_type(df, "task")
-        ready = df_tasks[df_tasks.get("reviewed") == True]
-        if ready.empty:
-            st.info("No tasks ready for client approval")
+        if df_tasks.empty:
+            st.info("No tasks.")
         else:
-            for i, r in ready.iterrows():
-                st.markdown(f"**{r.get('task')}** — {r.get('employee')}")
-                if st.button(f"Approve {r.get('task')}", key=f"cl_app_{i}"):
-                    updated = dict(r)
-                    updated["client_approved_on"] = str(datetime.now())
-                    upsert_records([updated])
-                    st.success("Approved")
-                    df = fetch_all()
+            ready_mask = safe_column_equal(df_tasks, "reviewed", True)
+            ready = df_tasks[ready_mask]
+            if ready.empty:
+                st.info("No tasks ready for client approval")
+            else:
+                for i, r in ready.iterrows():
+                    st.markdown(f"**{r.get('task')}** — {r.get('employee')}")
+                    if st.button(f"Approve {r.get('task')}", key=f"cl_app_{i}"):
+                        updated = dict(r)
+                        updated["client_approved_on"] = str(datetime.now())
+                        upsert_records([updated])
+                        st.success("Approved")
+                        df = fetch_all()
 
     with tabs[2]:
         st.subheader("Meetings")
@@ -458,7 +532,7 @@ elif role == "Client":
         else:
             st.dataframe(meetings[["meeting_title", "organizer", "meeting_datetime", "participants", "attachment"]])
 
-# ------------- ADMIN UI -------------
+# ------------- ADMIN -------------
 elif role == "Admin":
     st.header("🧠 Admin — Global Overview")
     df_tasks = filter_by_type(df, "task")
@@ -474,5 +548,6 @@ elif role == "Admin":
         except Exception:
             st.info("Leaderboard unavailable")
 
+# ------------- Footer -------------
 st.markdown("---")
-st.caption("Fixed edition: avoids KeyError when optional columns are missing. If you still see an error, paste the exact traceback (full text) and I will patch immediately.")
+st.caption("Final stable edition. If any error appears, copy the full traceback and paste it here and I'll patch immediately.")
