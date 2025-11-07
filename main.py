@@ -1,314 +1,250 @@
-# app.py
-# Stable Enterprise Workforce System — Fully Fixed
-
 import streamlit as st
 import numpy as np
 import pandas as pd
 import uuid, os
 from datetime import date, datetime, timedelta
-
-# ML imports
+import plotly.express as px
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.svm import SVC
-from sklearn.cluster import KMeans
-import plotly.express as px
 
-# ----------------------------
-# PAGE CONFIG
-# ----------------------------
+# ----------------------------------------
+# CONFIG
+# ----------------------------------------
 st.set_page_config(page_title="AI Enterprise Workforce System", layout="wide")
-st.title("🏢 AI Enterprise Workforce & Task Management — Stable Build")
+st.title("🏢 AI Enterprise Workforce & Task Management — Secure AI Edition")
 
-# ----------------------------
-# PINECONE INITIALIZATION
-# ----------------------------
-USE_PINECONE = False
-try:
-    if "PINECONE_API_KEY" in st.secrets and st.secrets["PINECONE_API_KEY"]:
-        from pinecone import Pinecone, ServerlessSpec
-        pc = Pinecone(api_key=st.secrets["PINECONE_API_KEY"])
-        USE_PINECONE = True
-except Exception:
-    USE_PINECONE = False
+# ----------------------------------------
+# LOGIN SECURITY
+# ----------------------------------------
+users = {
+    "Manager": {"username": "manager", "password": "admin123"},
+    "Team Member": {"username": "team", "password": "emp123"},
+    "Client": {"username": "client", "password": "client123"}
+}
 
-INDEX_NAME = "task"
-DIMENSION = 1024
-index = None
+role = st.sidebar.selectbox("Login as", ["Manager", "Team Member", "Client"])
+uname = st.sidebar.text_input("Username")
+pwd = st.sidebar.text_input("Password", type="password")
 
-if USE_PINECONE:
-    try:
-        if INDEX_NAME not in [i["name"] for i in pc.list_indexes()]:
-            pc.create_index(
-                name=INDEX_NAME,
-                dimension=DIMENSION,
-                metric="cosine",
-                spec=ServerlessSpec(cloud="aws", region="us-east-1")
-            )
-        index = pc.Index(INDEX_NAME)
-        st.sidebar.success("✅ Pinecone Connected")
-    except Exception as e:
-        st.sidebar.error(f"Pinecone init failed: {e}")
-        USE_PINECONE = False
-else:
-    st.sidebar.warning("⚠️ Using local in-memory database")
+if uname != users[role]["username"] or pwd != users[role]["password"]:
+    st.warning("🔐 Please enter valid login credentials.")
+    st.stop()
 
-# ----------------------------
-# SAFE HELPERS
-# ----------------------------
-if "local_db" not in st.session_state:
-    st.session_state["local_db"] = {}
+st.sidebar.success(f"✅ Logged in as {role}")
 
-def safe_columns(df, cols):
-    return [c for c in cols if c in df.columns]
+# ----------------------------------------
+# LOCAL DB
+# ----------------------------------------
+if "data" not in st.session_state:
+    st.session_state["data"] = []
 
-def now_str():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+def now_str(): return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-def rand_vec():
-    return np.random.rand(DIMENSION).tolist()
+def save_record(rec):
+    st.session_state["data"].append(rec)
 
-def upsert_record(md, record_id=None):
-    md = {k: (float(v) if isinstance(v, np.generic) else v) for k, v in md.items()}
-    rid = record_id or str(uuid.uuid4())
-    if USE_PINECONE and index:
-        try:
-            index.upsert([{"id": rid, "values": rand_vec(), "metadata": md}])
-            return rid
-        except Exception as e:
-            st.warning(f"Pinecone upsert failed: {e}")
-    st.session_state["local_db"][rid] = md
-    return rid
+def get_records(filter_by=None):
+    df = pd.DataFrame(st.session_state["data"])
+    if filter_by:
+        for k, v in filter_by.items():
+            df = df[df[k] == v]
+    return df if not df.empty else pd.DataFrame()
 
-def query_records(filters=None):
-    if USE_PINECONE and index:
-        try:
-            res = index.query(vector=rand_vec(), top_k=500, include_metadata=True, filter=filters or {})
-            return [m.metadata for m in res.matches if m.metadata]
-        except Exception as e:
-            st.warning(f"Pinecone query error: {e}")
-    # fallback to local memory
-    records = list(st.session_state["local_db"].values())
-    if filters:
-        def match(md):
-            for k, v in filters.items():
-                if isinstance(v, dict) and "$eq" in v:
-                    if md.get(k) != v["$eq"]:
-                        return False
-                else:
-                    if md.get(k) != v:
-                        return False
-            return True
-        records = [m for m in records if match(m)]
-    return records
-
-# ----------------------------
-# ML MODELS
-# ----------------------------
+# ----------------------------------------
+# SIMPLE MODELS
+# ----------------------------------------
 lin_reg = LinearRegression().fit([[0], [50], [100]], [0, 2.5, 5])
 log_reg = LogisticRegression().fit([[0], [40], [80], [100]], [0, 0, 1, 1])
-rf = RandomForestClassifier().fit(np.array([[10, 2], [50, 1], [90, 0], [100, 0]]), [1, 0, 0, 0])
+rf = RandomForestClassifier().fit(np.array([[10,2],[50,1],[90,0],[100,0]]), [1,0,0,0])
 vec = CountVectorizer()
-X_sample = vec.fit_transform(["excellent work", "needs improvement", "bad performance", "great job", "average"])
-svm_clf = SVC().fit(X_sample, [1, 0, 0, 1, 0])
+X = vec.fit_transform(["good job", "bad performance", "excellent work", "needs improvement", "great results"])
+svm = SVC().fit(X, [1, 0, 1, 0, 1])
 
-# ----------------------------
-# ROLE SELECTION
-# ----------------------------
-role = st.sidebar.selectbox("Login as", ["Manager", "Team Member", "Client"])
-os.makedirs("uploads", exist_ok=True)
-
-# ----------------------------
+# ----------------------------------------
 # MANAGER DASHBOARD
-# ----------------------------
+# ----------------------------------------
 if role == "Manager":
-    st.header("👨‍💼 Manager Dashboard")
-    tabs = st.tabs(["Assign / Reassign", "Review Tasks", "Inner Department", "360° Overview", "Leave Requests"])
+    st.header("👨‍💼 Manager Dashboard — Enterprise Suite")
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📋 Assign / Reassign", "🧾 Review Tasks", "🏢 Inner Department", "🌐 360° Overview", "🏖 Leave Management"
+    ])
 
-    # 1️⃣ Assign / Reassign
-    with tabs[0]:
-        st.subheader("Assign Task")
+    # ------------------ Assign / Reassign ------------------
+    with tab1:
+        st.subheader("Assign New Task")
         with st.form("assign_form"):
-            company = st.text_input("🏢 Company")
-            department = st.selectbox("🏬 Department", ["IT", "HR", "Finance", "Marketing", "Operations"])
-            team = st.text_input("👥 Team (optional)")
-            employee = st.text_input("👤 Employee")
+            company = st.text_input("🏢 Company Name")
+            department = st.selectbox("🏬 Department", ["IT", "Finance", "HR", "Marketing", "Operations"])
+            team = st.text_input("👥 Team Name")
+            employee = st.text_input("👤 Employee Name")
             task = st.text_input("🧠 Task Title")
-            desc = st.text_area("📝 Description")
-            deadline = st.date_input("📅 Deadline", value=date.today() + timedelta(days=5))
-            file = st.file_uploader("📎 Attach File (optional)")
+            desc = st.text_area("📝 Task Description")
+            deadline = st.date_input("📅 Deadline", value=date.today() + timedelta(days=7))
+            file = st.file_uploader("📎 Attach Proof (optional)")
             submit = st.form_submit_button("✅ Assign Task")
 
             if submit and company and employee and task:
-                path = None
-                if file:
-                    path = f"uploads/{uuid.uuid4()}_{file.name}"
-                    with open(path, "wb") as f:
-                        f.write(file.getbuffer())
                 record = {
-                    "company": company, "department": department, "team": team,
+                    "id": str(uuid.uuid4()), "company": company, "department": department, "team": team,
                     "employee": employee, "task": task, "description": desc,
                     "completion": 0, "marks": 0, "status": "Assigned",
-                    "deadline": deadline.isoformat(), "file": path,
-                    "reviewed": False, "assigned_on": now_str()
+                    "deadline": deadline.isoformat(), "reviewed": False,
+                    "assigned_on": now_str(), "sentiment": "N/A", "proof": file.name if file else None
                 }
-                rid = upsert_record(record)
-                st.success(f"✅ Task '{task}' assigned to {employee} (ID: {rid})")
+                save_record(record)
+                st.success(f"✅ Task '{task}' assigned to {employee}")
 
         st.divider()
         st.subheader("♻️ Reassign Task")
-        company_r = st.text_input("Company for Reassign")
-        emp_from = st.text_input("From Employee")
-        emp_to = st.text_input("To Employee")
+        company_r = st.text_input("Company for Reassignment")
+        emp_from = st.text_input("Current Employee")
+        emp_to = st.text_input("New Employee")
         if st.button("🔁 Reassign"):
-            if company_r and emp_from and emp_to:
-                recs = query_records({"company": {"$eq": company_r}, "employee": {"$eq": emp_from}})
-                for r in recs:
-                    r["employee"] = emp_to
-                    r["status"] = "Reassigned"
-                    upsert_record(r)
-                st.success(f"♻️ {len(recs)} tasks reassigned from {emp_from} to {emp_to}")
+            df = get_records({"company": company_r, "employee": emp_from})
+            if not df.empty:
+                for i in df.index:
+                    st.session_state["data"][i]["employee"] = emp_to
+                    st.session_state["data"][i]["status"] = "Reassigned"
+                st.success(f"Reassigned {len(df)} tasks from {emp_from} to {emp_to}")
             else:
-                st.warning("Fill all fields to reassign.")
+                st.warning("No matching tasks found.")
 
-    # 2️⃣ Review Tasks
-    with tabs[1]:
-        st.subheader("Review Tasks")
+    # ------------------ Review Tasks ------------------
+    with tab2:
+        st.subheader("🔍 Review Employee Tasks")
         company = st.text_input("Company to Review")
-        if st.button("Load Pending"):
-            recs = query_records({"company": {"$eq": company}, "reviewed": {"$eq": False}})
-            for r in recs:
-                st.markdown(f"### {r['task']} — {r['employee']}")
-                adj = st.slider(f"Completion for {r['task']}", 0, 100, int(r["completion"]))
-                comments = st.text_area("Manager Comments", key=f"c_{r['task']}")
-                if st.button(f"Finalize {r['task']}", key=f"f_{r['task']}"):
-                    marks = float(lin_reg.predict([[adj]])[0])
-                    status = "On Track" if log_reg.predict([[adj]])[0] == 1 else "Delayed"
-                    sentiment = "Positive" if svm_clf.predict(vec.transform([comments]))[0] == 1 else "Negative"
-                    r.update({
-                        "completion": adj, "marks": marks, "status": status,
-                        "sentiment": sentiment, "reviewed": True, "comments": comments
-                    })
-                    upsert_record(r)
-                    st.success(f"✅ Reviewed '{r['task']}' ({sentiment})")
+        if st.button("Load Tasks"):
+            df = get_records({"company": company})
+            if not df.empty:
+                for i, r in df.iterrows():
+                    st.write(f"### {r['employee']} — {r['task']}")
+                    adj = st.slider("Completion %", 0, 100, int(r["completion"]), key=f"adj_{i}")
+                    comments = st.text_area("Manager Comments", key=f"com_{i}")
+                    if st.button(f"Finalize Review {i}"):
+                        marks = float(lin_reg.predict([[adj]])[0])
+                        status = "On Track" if log_reg.predict([[adj]])[0] == 1 else "Delayed"
+                        sentiment = "Positive" if svm.predict(vec.transform([comments]))[0] == 1 else "Negative"
+                        st.session_state["data"][i]["completion"] = adj
+                        st.session_state["data"][i]["marks"] = marks
+                        st.session_state["data"][i]["status"] = status
+                        st.session_state["data"][i]["sentiment"] = sentiment
+                        st.session_state["data"][i]["reviewed"] = True
+                        st.success(f"✅ Reviewed {r['task']} ({sentiment})")
+            else:
+                st.warning("No tasks found.")
 
-    # 3️⃣ Inner Department
-    with tabs[2]:
-        st.subheader("🏢 Inner Department Overview")
-        recs = query_records()
-        if recs:
-            df = pd.DataFrame(recs)
-            if "department" in df.columns:
-                dept = st.selectbox("Select Department", df["department"].unique())
-                ddf = df[df["department"] == dept]
-                st.metric("👥 Employees", ddf["employee"].nunique())
-                st.metric("📈 Avg Completion", f"{ddf['completion'].astype(float).mean():.1f}%")
-                st.metric("🏆 Avg Marks", f"{ddf['marks'].astype(float).mean():.2f}")
-                cols = safe_columns(ddf, ["employee", "task", "marks", "completion", "team"])
-                st.dataframe(ddf[cols])
-                if "team" in ddf.columns:
-                    fig = px.bar(ddf, x="employee", y="marks", color="team", title=f"{dept} Department Performance")
-                    st.plotly_chart(fig, use_container_width=True)
+    # ------------------ Inner Department ------------------
+    with tab3:
+        st.subheader("🏢 Departmental Performance")
+        df = get_records()
+        if not df.empty:
+            depts = df["department"].unique().tolist()
+            dept = st.selectbox("Select Department", depts)
+            ddf = df[df["department"] == dept]
+            st.metric("👥 Employees", ddf["employee"].nunique())
+            st.metric("🏆 Avg Marks", f"{ddf['marks'].mean():.2f}")
+            st.metric("✅ Avg Completion", f"{ddf['completion'].mean():.1f}%")
+            fig = px.bar(ddf, x="employee", y="marks", color="team", title=f"{dept} Department Performance")
+            st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info("No data available.")
+            st.info("No data available yet.")
 
-    # 4️⃣ 360° Overview
-    with tabs[3]:
-        st.subheader("🌐 360° Overview")
-        recs = query_records()
-        if recs:
-            df = pd.DataFrame(recs)
-            if "marks" in df.columns:
-                df["marks"] = pd.to_numeric(df["marks"], errors="coerce")
-            if "completion" in df.columns:
-                df["completion"] = pd.to_numeric(df["completion"], errors="coerce")
-            st.metric("🌟 Total Employees", df["employee"].nunique())
-            st.metric("✅ Avg Completion", f"{df['completion'].mean():.1f}%")
-            st.metric("🏅 Avg Marks", f"{df['marks'].mean():.2f}")
+    # ------------------ 360 Overview ------------------
+    with tab4:
+        st.subheader("🌐 360° Organizational Overview")
+        df = get_records()
+        if not df.empty:
+            st.metric("Total Employees", df["employee"].nunique())
+            st.metric("Average Marks", f"{df['marks'].mean():.2f}")
+            st.metric("Average Completion", f"{df['completion'].mean():.1f}%")
 
             if "sentiment" in df.columns:
                 sent = df["sentiment"].value_counts().reset_index()
-                fig = px.pie(sent, names="index", values="sentiment", title="Sentiment Distribution")
+                fig = px.pie(sent, names="index", values="sentiment", title="Sentiment Analysis Overview")
                 st.plotly_chart(fig, use_container_width=True)
-
-            if {"employee", "completion", "marks"} <= set(df.columns):
-                fig2 = px.scatter(df, x="completion", y="marks", color="employee", title="Performance Scatter")
-                st.plotly_chart(fig2, use_container_width=True)
         else:
-            st.info("No records found.")
+            st.warning("No data to display.")
 
-    # 5️⃣ Leave Requests
-    with tabs[4]:
-        st.subheader("🏖 Leave Requests")
-        leaves = query_records({"status": {"$eq": "Leave Applied"}})
-        if leaves:
-            for l in leaves:
-                st.write(f"🧾 {l['employee']} — {l['leave_type']} ({l['from']} to {l['to']})")
-                if st.button(f"Approve {l['employee']}", key=l["employee"]):
-                    l["status"] = "Leave Approved"
-                    upsert_record(l)
-                    st.success("Approved")
+    # ------------------ Leave Management ------------------
+    with tab5:
+        st.subheader("🏖 Manage Leave Requests")
+        df = get_records({"status": "Leave Applied"})
+        if not df.empty:
+            for i, l in df.iterrows():
+                st.write(f"🧾 {l['employee']} | {l['leave_type']} ({l['from']} → {l['to']})")
+                if st.button(f"Approve {l['employee']}", key=f"ap_{i}"):
+                    st.session_state["data"][i]["status"] = "Leave Approved"
+                    st.success(f"✅ Approved {l['employee']}'s leave")
         else:
-            st.info("No leave requests.")
+            st.info("No pending leave requests.")
 
-# ----------------------------
-# TEAM MEMBER
-# ----------------------------
+# ----------------------------------------
+# TEAM MEMBER PORTAL
+# ----------------------------------------
 elif role == "Team Member":
-    st.header("👩‍💻 Team Member Portal")
+    st.header("👩‍💻 Team Member Workspace")
     company = st.text_input("🏢 Company")
-    employee = st.text_input("👤 Name")
+    employee = st.text_input("👤 Your Name")
     task = st.text_input("🧠 Task Title")
     completion = st.slider("✅ Completion %", 0, 100, 0)
-    if st.button("Submit Progress"):
+    if st.button("📩 Submit Update"):
         marks = lin_reg.predict([[completion]])[0]
         status = "On Track" if log_reg.predict([[completion]])[0] == 1 else "Delayed"
-        record = {"company": company, "employee": employee, "task": task,
-                  "completion": completion, "marks": marks, "status": status,
-                  "reviewed": False, "submitted_on": now_str()}
-        upsert_record(record)
-        st.success("Progress submitted.")
+        record = {
+            "id": str(uuid.uuid4()), "company": company, "employee": employee, "task": task,
+            "completion": completion, "marks": marks, "status": status,
+            "reviewed": False, "submitted_on": now_str()
+        }
+        save_record(record)
+        st.success(f"✅ Task update saved for {employee}")
 
     st.divider()
     st.subheader("🏖 Apply for Leave")
-    leave_type = st.selectbox("Type", ["Casual", "Sick", "Paid"])
-    from_date = st.date_input("From")
-    to_date = st.date_input("To", value=date.today() + timedelta(days=1))
+    leave_type = st.selectbox("Leave Type", ["Casual", "Sick", "Paid"])
+    from_d = st.date_input("From")
+    to_d = st.date_input("To", value=date.today() + timedelta(days=2))
     reason = st.text_area("Reason")
     if st.button("Apply Leave"):
-        upsert_record({
-            "employee": employee, "leave_type": leave_type,
-            "from": from_date.isoformat(), "to": to_date.isoformat(),
-            "reason": reason, "status": "Leave Applied"
+        save_record({
+            "id": str(uuid.uuid4()), "employee": employee, "leave_type": leave_type,
+            "from": from_d.isoformat(), "to": to_d.isoformat(), "reason": reason, "status": "Leave Applied"
         })
-        st.success("Leave applied successfully.")
+        st.success("Leave application submitted!")
 
-# ----------------------------
-# CLIENT
-# ----------------------------
+# ----------------------------------------
+# CLIENT PORTAL
+# ----------------------------------------
 elif role == "Client":
-    st.header("🧾 Client Review Portal")
+    st.header("🧾 Client Project Portal")
     company = st.text_input("🏢 Company Name")
-    if st.button("Load Reviewed"):
-        recs = query_records({"company": {"$eq": company}, "reviewed": {"$eq": True}})
-        if recs:
-            for r in recs:
-                color = "green" if r.get("sentiment") == "Positive" else "red"
+    if st.button("View Completed Projects"):
+        df = get_records({"company": company, "reviewed": True})
+        if not df.empty:
+            for i, r in df.iterrows():
                 st.markdown(
-                    f"<div style='padding:10px;margin:5px;border-radius:10px;border:1px solid #ddd'>"
+                    f"<div style='border:1px solid #ddd;border-radius:10px;padding:10px;margin:5px;background:#f9f9f9'>"
                     f"<b>{r['employee']}</b> — {r['task']}<br>"
-                    f"Marks: {r.get('marks', 0):.2f} | Completion: {r.get('completion', 0)}%<br>"
-                    f"<b>Status:</b> {r.get('status')}<br>"
-                    f"<b style='color:{color}'>Sentiment:</b> {r.get('sentiment', 'N/A')}"
-                    f"</div>",
+                    f"✅ Completion: {r['completion']}% | Marks: {r['marks']:.2f}<br>"
+                    f"💬 Sentiment: {r['sentiment']}</div>",
                     unsafe_allow_html=True
                 )
+            st.divider()
+            st.subheader("⭐ Provide Feedback")
+            rating = st.slider("Rate Overall Project", 1, 5, 4)
+            comment = st.text_area("Add Comments")
+            if st.button("Submit Feedback"):
+                save_record({
+                    "id": str(uuid.uuid4()), "company": company, "type": "Client Feedback",
+                    "rating": rating, "comment": comment, "submitted_on": now_str()
+                })
+                st.success("✅ Feedback submitted successfully.")
         else:
-            st.info("No reviewed tasks found.")
+            st.info("No completed tasks available.")
 
-# ----------------------------
+# ----------------------------------------
 # FOOTER
-# ----------------------------
+# ----------------------------------------
 st.markdown("---")
-st.caption("✅ Stable Build — No syntax, KeyError, or ValueError issues. Ready for presentation.")
+st.caption("🌟 Enterprise Edition — with login, 360° insights, and AI-driven workforce analytics.")
