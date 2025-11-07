@@ -1,3 +1,4 @@
+# main.py
 import streamlit as st
 from pinecone import Pinecone, ServerlessSpec
 import numpy as np
@@ -10,105 +11,78 @@ from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.svm import SVC
 from textblob import TextBlob
 import plotly.express as px
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from twilio.rest import Client
+import plotly.graph_objects as go
 import uuid
-import warnings
-
-# Suppress warnings from scikit-learn about n_init
-warnings.filterwarnings("ignore", category=UserWarning, module="sklearn.cluster._kmeans")
+from sklearn.linear_model import LinearRegression as SklearnLinear
+import math
 
 # -----------------------------
 # PAGE CONFIG
 # -----------------------------
-st.set_page_config(page_title="🚀 AI-Driven Employee & Project Management", layout="wide")
-st.title("🚀 AI-Driven Employee & Project Management System")
-st.markdown("---")
+st.set_page_config(page_title="AI Employee Management", layout="wide")
+st.title("🤖 AI-Driven Employee Management System")
 
 # -----------------------------
-# INITIALIZATION
+# PINECONE INITIALIZATION (from Streamlit Secrets)
 # -----------------------------
-PINECONE_API_KEY = st.secrets.get("PINECONE_API_KEY")
-EMAIL_SENDER = st.secrets.get("EMAIL_SENDER", "")
-EMAIL_PASSWORD = st.secrets.get("EMAIL_PASSWORD", "")
-SMS_SID = st.secrets.get("TWILIO_ACCOUNT_SID", "")
-SMS_AUTH = st.secrets.get("TWILIO_AUTH_TOKEN", "")
-SMS_FROM = st.secrets.get("TWILIO_PHONE_NUMBER", "")
+# Accept either grouped secret st.secrets["pinecone"]["api_key"] or top-level key PINECONE_API_KEY.
+pinecone_key = None
+pinecone_env = None
+index_name_secret = None
+dimension_secret = None
 
-if not PINECONE_API_KEY:
-    st.error("PINECONE_API_KEY not found in Streamlit secrets. Please add it to your .streamlit/secrets.toml file.")
+if "pinecone" in st.secrets:
+    pinecone_key = st.secrets["pinecone"].get("api_key")
+    pinecone_env = st.secrets["pinecone"].get("environment", "us-east-1")
+    index_name_secret = st.secrets["pinecone"].get("index_name", "task")
+    dimension_secret = int(st.secrets["pinecone"].get("dimension", 1024))
+else:
+    # fallback to older top-level keys
+    pinecone_key = st.secrets.get("PINECONE_API_KEY") or st.secrets.get("PINECONE_KEY")
+    pinecone_env = st.secrets.get("PINECONE_ENV", "us-east-1")
+    index_name_secret = st.secrets.get("INDEX_NAME", "task")
+    dimension_secret = int(st.secrets.get("DIMENSION", 1024))
+
+if not pinecone_key:
+    st.error("Pinecone API key not found in Streamlit secrets. Add it under [pinecone] or PINECONE_API_KEY.")
     st.stop()
 
-pc = Pinecone(api_key=PINECONE_API_KEY)
-INDEX_NAME = "task" # Updated index name for broader scope
-DIMENSION = 1024
+try:
+    pc = Pinecone(api_key=pinecone_key)
+    INDEX_NAME = index_name_secret or "task"
+    DIMENSION = dimension_secret or 1024
 
-if INDEX_NAME not in [i["name"] for i in pc.list_indexes()]:
-    try:
+    if INDEX_NAME not in [i["name"] for i in pc.list_indexes()]:
         pc.create_index(
             name=INDEX_NAME,
             dimension=DIMENSION,
             metric="cosine",
             spec=ServerlessSpec(cloud="aws", region="us-east-1")
         )
-        st.success(f"Pinecone index '{INDEX_NAME}' created.")
-    except Exception as e:
-        st.error(f"Failed to create Pinecone index: {e}")
-        st.stop()
-
-index = pc.Index(INDEX_NAME)
-
-def now(): return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-def rand_vec(): return np.random.rand(DIMENSION).tolist()
+    index = pc.Index(INDEX_NAME)
+except Exception as e:
+    st.error(f"Pinecone init failed: {e}")
+    st.stop()
 
 # -----------------------------
 # HELPERS
 # -----------------------------
-def safe_upsert(md_list):
-    """
-    Safely upserts a list of dictionaries (metadata) to Pinecone.
-    Each dictionary must contain an 'id' key or one will be generated.
-    Ensures all metadata values are JSON-serializable.
-    """
-    upsert_data = []
-    for md in md_list:
-        doc_id = str(md.get("_id", uuid.uuid4()))
-        # Filter out _id and ensure other keys are serializable
-        clean_md = {k: v for k, v in md.items() if not k.startswith('_')}
-        # Convert any datetime/date objects to string if they slip through
-        for k, v in clean_md.items():
-            if isinstance(v, (datetime, date)):
-                clean_md[k] = str(v)
+def now(): return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+def rand_vec(): return np.random.rand(DIMENSION).tolist()
 
-        upsert_data.append({
-            "id": doc_id,
-            "values": rand_vec(), # In a real app, replace with actual embeddings
-            "metadata": clean_md
-        })
+def safe_upsert(md):
     try:
-        index.upsert(vectors=upsert_data)
-        st.success(f"Successfully upserted {len(upsert_data)} records.")
-        return True
+        index.upsert([{
+            "id": str(md.get("_id", uuid.uuid4())),
+            "values": rand_vec(),
+            "metadata": md
+        }])
     except Exception as e:
-        st.error(f"Pinecone upsert failed: {e}")
-        return False
+        st.warning(f"Pinecone upsert failed: {e}")
 
-@st.cache_data(ttl=60) # Cache data for 60 seconds to reduce Pinecone calls
 def fetch_all():
-    """
-    Fetches all documents (up to top_k) from Pinecone.
-    Includes a check for empty index.
-    """
     try:
-        # Check if the index has any vectors before querying
-        index_stats = index.describe_index_stats()
-        if index_stats.dimension == 0 or index_stats.total_vector_count == 0:
-            st.info("Pinecone index appears empty. No data to fetch.")
-            return pd.DataFrame()
-
-        res = index.query(vector=rand_vec(), top_k=10000, include_metadata=True)
+        res = index.query(vector=rand_vec(), top_k=1000, include_metadata=True)
         rows = []
         for m in res.matches:
             md = m.metadata or {}
@@ -116,532 +90,430 @@ def fetch_all():
             rows.append(md)
         return pd.DataFrame(rows)
     except Exception as e:
-        st.warning(f"⚠️ Unable to fetch data from Pinecone: {e}")
+        st.warning(f"Unable to fetch data: {e}")
         return pd.DataFrame()
 
 def safe_rerun():
-    st.rerun()
+    try: st.experimental_rerun()
+    except Exception: pass
 
 # -----------------------------
-# NOTIFICATIONS
+# NOTIFICATIONS (placeholder)
 # -----------------------------
-def send_email(to, subject, message):
-    if not EMAIL_SENDER or not EMAIL_PASSWORD:
-        st.warning("Email sender credentials not configured. Skipping email.")
-        return False
-    try:
-        msg = MIMEMultipart()
-        msg["From"] = EMAIL_SENDER
-        msg["To"] = to
-        msg["Subject"] = subject
-        msg.attach(MIMEText(message, "plain"))
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-            server.send_message(msg)
-        return True
-    except Exception as e:
-        st.warning(f"Email failed: {e}. Check sender email, password, and 'less secure app access' settings if using Gmail.")
-        return False
-
-def send_sms(to, message):
-    if not SMS_SID or not SMS_AUTH or not SMS_FROM:
-        st.warning("Twilio SMS credentials not configured. Skipping SMS.")
-        return False
-    try:
-        client = Client(SMS_SID, SMS_AUTH)
-        if not to or not to.startswith('+'): # Added check for empty 'to'
-            st.warning(f"SMS recipient number '{to}' is invalid. It should start with a '+' and country code.")
-            return False
-        client.messages.create(body=message, from_=SMS_FROM, to=to)
-        return True
-    except Exception as e:
-        st.warning(f"SMS failed: {e}. Ensure Twilio credentials and 'to' number format are correct.")
-        return False
-
-def send_notification(email=None, phone=None, subject="Update", msg="Task update"):
-    email_sent = False
-    sms_sent = False
-    if email:
-        email_sent = send_email(email, subject, msg)
-    if phone:
-        sms_sent = send_sms(phone, msg)
-    return email_sent or sms_sent
+def send_notification(email=None, phone=None, subject="Update", msg=""):
+    # Placeholder: integrate SMTP or Twilio via st.secrets if desired
+    # Example: send_email(email, subject, msg)
+    st.info(f"Notification -> {email or phone}: {subject}")
 
 # -----------------------------
-# SIMPLE MODELS (Cached for performance)
+# SIMPLE ML MODELS
 # -----------------------------
-@st.cache_resource
-def get_models():
-    lin_reg_model = LinearRegression()
-    lin_reg_model.fit(np.array([[0], [50], [100]]), np.array([0, 2.5, 5]))
-
-    log_reg_model = LogisticRegression(solver='liblinear')
-    log_reg_model.fit(np.array([[0], [40], [80], [100]]), np.array([0, 0, 1, 1]))
-
-    rf_model = RandomForestClassifier(random_state=42)
-    rf_model.fit(np.array([[10, 2], [50, 1], [90, 0], [100, 0]]), [0, 1, 0, 0])
-
-    vectorizer_model = CountVectorizer()
-    X_train = vectorizer_model.fit_transform(["excellent work", "needs improvement", "bad performance", "great job", "average"])
-    svm_clf_model = SVC(kernel='linear', random_state=42)
-    svm_clf_model.fit(X_train, [1, 0, 0, 1, 0])
-
-    return lin_reg_model, log_reg_model, rf_model, vectorizer_model, svm_clf_model
-
-lin_reg, log_reg, rf, vectorizer, svm_clf = get_models()
-
-# -----------------------------
-# GLOBAL EMPLOYEE/DEPARTMENT DATA (For multi-person & reassign)
-# This would ideally come from a separate employee database/Pinecone index
-# For demonstration, we'll simulate it.
-# -----------------------------
-@st.cache_data
-def get_mock_employees_data():
-    employees = [
-        {"name": "Alice Smith", "email": "alice@example.com", "phone": "+15551234001", "department": "Tech", "company": "Acme Inc."},
-        {"name": "Bob Johnson", "email": "bob@example.com", "phone": "+15551234002", "department": "Design", "company": "Acme Inc."},
-        {"name": "Charlie Brown", "email": "charlie@example.com", "phone": "+15551234003", "department": "HR", "company": "Acme Inc."},
-        {"name": "Diana Prince", "email": "diana@example.com", "phone": "+15551234004", "department": "Sales", "company": "Acme Inc."},
-        {"name": "Eve Adams", "email": "eve@example.com", "phone": "+15551234005", "department": "Tech", "company": "Acme Inc."},
-        {"name": "Frank White", "email": "frank@example.com", "phone": "+15551234006", "department": "Design", "company": "Acme Inc."},
-        {"name": "Grace Hopper", "email": "grace@example.com", "phone": "+15551234007", "department": "Tech", "company": "Globex Corp."},
-        {"name": "Harry Potter", "email": "harry@example.com", "phone": "+15551234008", "department": "Marketing", "company": "Globex Corp."},
-    ]
-    return pd.DataFrame(employees)
-
-mock_employees_df = get_mock_employees_data()
+lin_reg = LinearRegression().fit([[0], [50], [100]], [0, 2.5, 5])
+log_reg = LogisticRegression().fit([[0], [40], [80], [100]], [0, 0, 1, 1])
+vectorizer = CountVectorizer()
+X_train = vectorizer.fit_transform(["excellent work", "needs improvement", "bad performance", "great job", "average"])
+svm_clf = SVC().fit(X_train, [1, 0, 0, 1, 0])
+rf = RandomForestClassifier().fit(np.array([[10, 2], [50, 1], [90, 0], [100, 0]]), [1, 0, 0, 0])
 
 # -----------------------------
 # ROLE SELECTION
 # -----------------------------
 role = st.sidebar.selectbox("Login as", ["Manager", "Team Member", "Client", "Admin"])
 current_month = datetime.now().strftime("%B %Y")
-st.sidebar.markdown(f"Current Month: **{current_month}**")
-st.sidebar.markdown("---")
-
 
 # -----------------------------
 # MANAGER DASHBOARD
 # -----------------------------
 if role == "Manager":
-    st.header("👨‍💼 Manager Dashboard: Project & Task Oversight")
-    tab1, tab2, tab3, tab4 = st.tabs(["Assign Tasks / Projects", "Review Tasks", "Reassign Tasks", "360° Overview"])
+    st.header("👨‍💼 Manager Dashboard")
+    tab1, tab2, tab3, tab4 = st.tabs(["Assign Task", "Review Tasks", "360° Overview", "Managerial Actions"])
 
-    # --- Assign Task / Project ---
+    # --- Assign Task ---
     with tab1:
-        st.subheader("📝 Assign New Task or Project")
-        with st.form("assign_task_form"):
-            company = st.text_input("Company Name", key="manager_company_assign")
-            task_title = st.text_input("Task/Project Title", key="manager_task_title")
-            task_desc = st.text_area("Description", key="manager_task_desc")
-            deadline = st.date_input("Deadline", date.today(), key="manager_deadline")
-            is_project = st.checkbox("Is this a Project (multiple assignees)?", key="is_project_checkbox")
-
-            if is_project:
-                st.markdown("##### Assign to Multiple Team Members")
-                available_employees = mock_employees_df[mock_employees_df['company'] == company]['name'].tolist() if company else mock_employees_df['name'].tolist()
-                assignees = st.multiselect("Select Team Members", options=available_employees, key="project_assignees")
-                departments = mock_employees_df['department'].unique().tolist()
-                department = st.selectbox("Department (optional)", options=[''] + departments, key="project_department")
-            else:
-                st.markdown("##### Assign to Single Team Member")
-                available_employees = mock_employees_df[mock_employees_df['company'] == company]['name'].tolist() if company else mock_employees_df['name'].tolist()
-                employee_name = st.selectbox("Employee Name", options=[''] + available_employees, key="single_employee_assign")
-                selected_employee_info = mock_employees_df[mock_employees_df['name'] == employee_name].iloc[0] if employee_name else {}
-                employee_email = selected_employee_info.get('email', '')
-                employee_phone = selected_employee_info.get('phone', '')
-                department = selected_employee_info.get('department', '')
-
-            submit_assign = st.form_submit_button("Assign Task/Project")
-
-            if submit_assign:
-                if not company or not task_title or not deadline:
-                    st.error("Company, Task/Project Title, and Deadline are required.")
-                elif is_project and not assignees:
-                    st.error("Please select at least one assignee for a project.")
-                elif not is_project and not employee_name:
-                    st.error("Please select an employee for a single task.")
+        st.subheader("Assign Task")
+        with st.form("assign_form"):
+            company = st.text_input("Company Name", key="mgr_assign_company")
+            employee = st.text_input("Employee Name", key="mgr_assign_employee")
+            employee_email = st.text_input("Employee Email (optional)", key="mgr_assign_email")
+            employee_phone = st.text_input("Employee Phone (optional)", key="mgr_assign_phone")
+            task = st.text_input("Task Title", key="mgr_assign_task")
+            desc = st.text_area("Description", key="mgr_assign_desc")
+            deadline = st.date_input("Deadline", value=date.today(), key="mgr_assign_deadline")
+            submitted = st.form_submit_button("Assign Task")
+            if submitted:
+                if not (company and employee and task):
+                    st.warning("Please fill Company, Employee, Task.")
                 else:
-                    tasks_to_upsert = []
-                    if is_project:
-                        for assignee in assignees:
-                            assignee_info = mock_employees_df[mock_employees_df['name'] == assignee].iloc[0].to_dict()
-                            md = {
-                                "_id": str(uuid.uuid4()),
-                                "type": "task",
-                                "is_project_task": True,
-                                "project_id": task_title.replace(" ", "_").lower() + "_" + str(uuid.uuid4())[:8],
-                                "project_title": task_title,
-                                "company": company,
-                                "employee": assignee_info['name'],
-                                "email": assignee_info.get('email', ''),
-                                "phone": assignee_info.get('phone', ''),
-                                "department": assignee_info.get('department', department),
-                                "task": task_title + f" ({assignee_info['name']}'s part)",
-                                "description": task_desc,
-                                "completion": 0, "marks": 0.0, "month": current_month,
-                                "deadline": str(deadline), "status": "Assigned", "assigned_on": now(),
-                                "reviewed": False, "client_reviewed": False
-                            }
-                            tasks_to_upsert.append(md)
-                            send_notification(md['email'], md['phone'], f"Project Task Assigned: {md['task']}", f"You have been assigned a task for project '{task_title}' at {company}. Deadline: {deadline}")
-                        st.success(f"✅ Project '{task_title}' assigned to {', '.join(assignees)} for {company}.")
-                    else:
-                        md = {
-                            "_id": str(uuid.uuid4()),
-                            "type": "task",
-                            "is_project_task": False,
-                            "company": company,
-                            "employee": employee_name,
-                            "email": employee_email,
-                            "phone": employee_phone,
-                            "department": department,
-                            "task": task_title,
-                            "description": task_desc,
-                            "completion": 0, "marks": 0.0, "month": current_month,
-                            "deadline": str(deadline), "status": "Assigned", "assigned_on": now(),
-                            "reviewed": False, "client_reviewed": False
-                        }
-                        tasks_to_upsert.append(md)
-                        send_notification(employee_email, employee_phone, f"Task Assigned: {task_title}", f"You have been assigned a task: {task_title} at {company}. Deadline: {deadline}")
-                        st.success(f"✅ Task '{task_title}' assigned to {employee_name} for {company}.")
-
-                    if tasks_to_upsert and safe_upsert(tasks_to_upsert):
-                        safe_rerun()
+                    tid = str(uuid.uuid4())
+                    md = {
+                        "_id": tid, "type": "task", "company": company, "employee": employee,
+                        "email": employee_email, "phone": employee_phone,
+                        "task": task, "description": desc,
+                        "deadline": deadline.isoformat(), "month": current_month,
+                        "completion": 0, "marks": 0, "status": "Assigned",
+                        "reviewed": False, "assigned_on": now()
+                    }
+                    safe_upsert(md)
+                    send_notification(employee_email, employee_phone, f"New Task: {task}", f"Task assigned: {task}")
+                    st.success(f"Assigned '{task}' to {employee}")
 
     # --- Review Tasks ---
     with tab2:
-        st.subheader("📋 Review Employee Tasks and Project Progress")
-        review_company = st.text_input("Company for Review", key="review_company_input_mgr")
-        review_filter_option = st.radio("Filter By:", ["Employee", "Department", "All Unreviewed"], key="review_filter_option_mgr", horizontal=True)
-
-        employee_filter_name = ""
-        department_filter_name = ""
-        if review_filter_option == "Employee":
-            available_employees = mock_employees_df[mock_employees_df['company'] == review_company]['name'].tolist() if review_company else mock_employees_df['name'].tolist()
-            employee_filter_name = st.selectbox("Select Employee", options=[''] + available_employees, key="review_employee_input_mgr")
-        elif review_filter_option == "Department":
-            available_departments = mock_employees_df[mock_employees_df['company'] == review_company]['department'].unique().tolist() if review_company else mock_employees_df['department'].unique().tolist()
-            department_filter_name = st.selectbox("Select Department", options=[''] + available_departments, key="review_department_input_mgr")
-
-        if st.button("Load Tasks for Review", key="load_review_tasks_btn_mgr"):
-            if not review_company:
-                st.error("Please enter Company Name.")
-            elif review_filter_option == "Employee" and not employee_filter_name:
-                st.error("Please select an Employee.")
-            elif review_filter_option == "Department" and not department_filter_name:
-                st.error("Please select a Department.")
-            else:
+        st.subheader("Review Tasks (by Company & Employee)")
+        c_name = st.text_input("Company to review", key="mgr_r_company")
+        e_name = st.text_input("Employee to review", key="mgr_r_employee")
+        if st.button("Load Tasks", key="mgr_load_tasks_btn"):
+            if c_name and e_name:
                 try:
-                    query_filter = {"company": {"$eq": review_company}, "type": {"$eq": "task"}, "reviewed": {"$eq": False}}
-                    if review_filter_option == "Employee" and employee_filter_name:
-                        query_filter["employee"] = {"$eq": employee_filter_name}
-                    elif review_filter_option == "Department" and department_filter_name:
-                        query_filter["department"] = {"$eq": department_filter_name}
-
-                    res = index.query(vector=rand_vec(), top_k=500, include_metadata=True, filter=query_filter)
-                    st.session_state["review_tasks"] = [(m.id, m.metadata) for m in res.matches]
-                    if not st.session_state["review_tasks"]:
-                        st.info("No unreviewed tasks found based on your filters.")
+                    res = index.query(vector=rand_vec(), top_k=500, include_metadata=True,
+                                      filter={"company": {"$eq": c_name}, "employee": {"$eq": e_name}})
+                    st.session_state["review_tasks"] = [(m.id, m.metadata) for m in res.matches or []]
+                    st.success(f"Loaded {len(st.session_state['review_tasks'])} tasks.")
                 except Exception as e:
-                    st.error(f"Error loading tasks for review: {e}")
-
-        if "review_tasks" in st.session_state and st.session_state["review_tasks"]:
-            st.write(f"**Tasks awaiting review:**")
-            for tid, r in st.session_state["review_tasks"]:
-                st.markdown(f"#### 🧾 {r.get('task')} (Employee: {r.get('employee')}, Dept: {r.get('department', 'N/A')})")
-                if r.get('is_project_task'):
-                    st.write(f"**Part of Project:** {r.get('project_title')}")
-                st.write(f"Description: {r.get('description')}")
-                st.write(f"Current Completion: {r.get('completion', 0)}%")
-                st.write(f"Deadline: {r.get('deadline')}")
-
-                with st.form(f"review_form_{tid}"):
-                    adj_completion = st.slider(f"Adjust Completion for {r.get('task')}", 0, 100, int(r.get("completion", 0)), key=f"adj_comp_{tid}")
-                    manager_comments = st.text_area("Manager Comments", key=f"mgr_comments_{tid}")
-                    approve_task = st.radio("Approve Task?", ["Yes", "No"], index=1 if not r.get("approved_by_boss", False) else 0, key=f"approve_{tid}")
-                    submit_review = st.form_submit_button(f"Finalize Review for '{r.get('task')}'")
-
-                    if submit_review:
-                        marks = float(lin_reg.predict([[adj_completion]])[0])
-                        sentiment = "Positive" if manager_comments and svm_clf.predict(vectorizer.transform([manager_comments]))[0] == 1 else "Negative" if manager_comments else "Neutral"
-
-                        updated_md = {**r,
-                                      "completion": adj_completion,
-                                      "marks": marks,
-                                      "sentiment": sentiment,
-                                      "manager_comments": manager_comments,
-                                      "approved_by_boss": approve_task == "Yes",
-                                      "reviewed": True,
-                                      "reviewed_on": now()}
-
-                        if safe_upsert([updated_md]):
-                            send_notification(
-                                r.get("email"), r.get("phone"),
-                                f"Task Reviewed: {r.get('task')}",
-                                f"Your task '{r.get('task')}' has been reviewed. Completion: {adj_completion}%, Marks: {marks:.2f}, Sentiment: {sentiment}. Manager Comments: {manager_comments}"
-                            )
-                            st.success(f"✅ Reviewed '{r.get('task')}' ({sentiment}).")
-                            safe_rerun()
-        elif "review_tasks" in st.session_state:
-            st.info("No tasks to review at this moment or all tasks have been approved.")
-
-    # --- Reassign Tasks ---
-    with tab3:
-        st.subheader("🔁 Reassign Tasks")
-        reassign_company = st.text_input("Company Name for Reassignment", key="reassign_company_input")
-        original_employee = st.selectbox("Original Employee (optional)", options=[''] + mock_employees_df['name'].tolist(), key="reassign_original_employee")
-
-        if st.button("Load Reassignable Tasks", key="load_reassign_tasks_btn"):
-            if not reassign_company:
-                st.error("Please enter the Company Name.")
+                    st.error(f"Error loading tasks: {e}")
             else:
-                try:
-                    reassign_filter = {"company": {"$eq": reassign_company}, "type": {"$eq": "task"}, "status": {"$ne": "Completed"}}
-                    if original_employee:
-                        reassign_filter["employee"] = {"$eq": original_employee}
-
-                    res = index.query(vector=rand_vec(), top_k=500, include_metadata=True, filter=reassign_filter)
-                    st.session_state["reassign_tasks"] = [(m.id, m.metadata) for m in res.matches]
-                    if not st.session_state["reassign_tasks"]:
-                        st.info("No active tasks found for reassignment based on your filters.")
-                except Exception as e:
-                    st.error(f"Error loading tasks for reassignment: {e}")
-
-        if "reassign_tasks" in st.session_state and st.session_state["reassign_tasks"]:
-            st.write("**Select a task to reassign:**")
-            selected_task_for_reassign_id = st.selectbox(
-                "Choose Task",
-                options=[t[0] for t in st.session_state["reassign_tasks"]],
-                format_func=lambda tid: f"{[t[1]['task'] for t in st.session_state['reassign_tasks'] if t[0]==tid][0]} (Current: {[t[1]['employee'] for t in st.session_state['reassign_tasks'] if t[0]==tid][0]})",
-                key="select_task_to_reassign"
-            )
-
-            if selected_task_for_reassign_id:
-                original_task_md = next(t[1] for t in st.session_state["reassign_tasks"] if t[0] == selected_task_for_reassign_id)
-                st.markdown(f"**Reassigning:** {original_task_md['task']} (Currently assigned to {original_task_md['employee']})")
-
-                with st.form(f"reassign_form_{selected_task_for_reassign_id}"):
-                    available_employees_for_reassign = mock_employees_df[mock_employees_df['company'] == original_task_md['company']]['name'].tolist()
-                    new_employee_name = st.selectbox(
-                        "New Assignee",
-                        options=[''] + available_employees_for_reassign,
-                        key=f"new_assignee_{selected_task_for_reassign_id}"
-                    )
-                    reassignment_reason = st.text_area("Reason for Reassignment", key=f"reassign_reason_{selected_task_for_reassign_id}")
-                    submit_reassign = st.form_submit_button("Confirm Reassignment")
-
-                    if submit_reassign:
-                        if not new_employee_name:
-                            st.error("Please select a new assignee.")
-                        else:
-                            new_assignee_info = mock_employees_df[mock_employees_df['name'] == new_employee_name].iloc[0].to_dict()
-                            old_employee_name = original_task_md['employee']
-
-                            reassigned_md = {
-                                **original_task_md,
-                                "employee": new_assignee_info['name'],
-                                "email": new_assignee_info.get('email', ''),
-                                "phone": new_assignee_info.get('phone', ''),
-                                "department": new_assignee_info.get('department', original_task_md.get('department', '')),
-                                "reassigned_from": old_employee_name,
-                                "reassigned_on": now(),
-                                "reassignment_reason": reassignment_reason,
-                                "status": "Reassigned"
-                            }
-
-                            if safe_upsert([reassigned_md]):
-                                st.success(f"✅ Task '{reassigned_md['task']}' successfully reassigned from {old_employee_name} to {new_employee_name}.")
-                                send_notification(original_task_md['email'], original_task_md['phone'],
-                                                  f"Task Reassigned: {original_task_md['task']}",
-                                                  f"Your task '{original_task_md['task']}' has been reassigned to {new_employee_name}. Reason: {reassignment_reason}")
-                                send_notification(new_assignee_info.get('email'), new_assignee_info.get('phone'),
-                                                  f"New Task Assignment: {reassigned_md['task']}",
-                                                  f"You have been assigned task '{reassigned_md['task']}' (reassigned from {old_employee_name}). Reason: {reassignment_reason}. Deadline: {reassigned_md['deadline']}")
-                                safe_rerun()
-        elif "reassign_tasks" in st.session_state:
-            st.info("No tasks to reassign at the moment or please load tasks.")
+                st.warning("Enter both company and employee.")
+        for tid, r in st.session_state.get("review_tasks", []):
+            st.markdown(f"### {r.get('task', 'Unnamed Task')}")
+            adj = st.slider(f"Adjust Completion ({r.get('employee', '')})", 0, 100, int(r.get("completion", 0)), key=f"mgr_slider_{tid}")
+            comments = st.text_area(f"Manager Comments ({r.get('task', '')})", key=f"mgr_comments_{tid}")
+            approve = st.radio(f"Approve {r.get('task', '')}?", ["Yes", "No"], key=f"mgr_approve_{tid}")
+            if st.button(f"Finalize Review {r.get('task', '')}", key=f"mgr_finalize_{tid}"):
+                sentiment_val = int(svm_clf.predict(vectorizer.transform([comments]))[0])
+                sentiment = "Positive" if sentiment_val == 1 else "Negative"
+                md = {**r, "completion": adj, "marks": float(lin_reg.predict([[adj]])[0]),
+                      "reviewed": True, "comments": comments, "sentiment": sentiment,
+                      "approved_by_boss": approve == "Yes", "reviewed_on": now()}
+                safe_upsert(md)
+                send_notification(r.get("email"), r.get("phone"),
+                                  subject=f"Task Review: {r.get('task')}",
+                                  msg=f"Your task was reviewed: Completion {adj}%, Marks {md['marks']:.2f}, Sentiment: {sentiment}")
+                st.success("Review saved.")
+                safe_rerun()
 
     # --- 360° Overview ---
-    with tab4:
-        st.subheader("📊 360° Performance Overview (All Tasks & Projects)")
-        df_all_data = fetch_all()
-
-        if df_all_data.empty or "type" not in df_all_data.columns:
-            st.info("No data available for overview yet.")
+    with tab3:
+        st.subheader("360° Performance Overview")
+        df = fetch_all()
+        if df.empty:
+            st.info("No tasks found.")
         else:
-            df_tasks = df_all_data[df_all_data["type"] == "task"].copy()
+            for col in ["marks", "completion"]:
+                if col not in df.columns:
+                    df[col] = np.nan
+            df["marks"] = pd.to_numeric(df["marks"], errors="coerce")
+            df["completion"] = pd.to_numeric(df["completion"], errors="coerce")
+            df = df.dropna(subset=["marks", "completion"])
+            if len(df) >= 3:
+                kmeans = KMeans(n_clusters=3, n_init=10, random_state=42).fit(df[["completion", "marks"]])
+                df["cluster"] = kmeans.labels_
+                fig = px.scatter(df, x="completion", y="marks", color=df["cluster"].astype(str),
+                                 hover_data=["employee", "task"], title="Employee Clusters")
+                st.plotly_chart(fig, use_container_width=True)
+            st.info(f"Avg marks: {df['marks'].mean():.2f}" if not df.empty else "No marks yet.")
 
-            if not df_tasks.empty:
-                df_tasks["marks"] = pd.to_numeric(df_tasks.get("marks", pd.Series()), errors="coerce").fillna(0)
-                df_tasks["completion"] = pd.to_numeric(df_tasks.get("completion", pd.Series()), errors="coerce").fillna(0)
-                df_tasks['department'] = df_tasks.get('department', pd.Series()).fillna('N/A') # Corrected access
-
-                st.subheader("Employee Performance Clusters")
-                if len(df_tasks) >= 3:
-                    kmeans = KMeans(n_clusters=3, random_state=42, n_init='auto')
-                    df_tasks["cluster"] = kmeans.fit_predict(df_tasks[["completion", "marks"]])
-                    fig = px.scatter(df_tasks, x="completion", y="marks", color=df_tasks["cluster"].astype(str),
-                                     hover_data=["employee", "task", "company", "status", "marks", "completion", "department", "is_project_task", "project_title"],
-                                     title="Employee Performance Clusters (Completion vs. Marks)")
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.info("Not enough data points (at least 3) to form performance clusters.")
-
-                st.markdown(f"**Overall Average Marks**: {df_tasks['marks'].mean():.2f}")
-                st.markdown(f"**Overall Average Completion**: {df_tasks['completion'].mean():.2f}%")
-
-                st.subheader("Department-wise Performance")
-                dep_avg = df_tasks.groupby("department")["marks"].mean().reset_index()
-                st.plotly_chart(px.bar(dep_avg, x="department", y="marks", title="Average Marks by Department"), use_container_width=True)
-
-                st.subheader("Employee Performance Table")
-                st.dataframe(df_tasks[['employee', 'company', 'department', 'task', 'project_title', 'completion', 'marks', 'sentiment', 'status', 'reviewed_on', 'approved_by_boss']].sort_values(by='marks', ascending=False), use_container_width=True)
-
-                st.subheader("Project-wise Overview")
-                projects_df = df_tasks[df_tasks['is_project_task']].copy()
-                if not projects_df.empty:
-                    project_summary = projects_df.groupby('project_title').agg(
-                        total_tasks=('task', 'count'),
-                        avg_completion=('completion', 'mean'),
-                        avg_marks=('marks', 'mean'),
-                        status_counts=('status', lambda x: x.value_counts().to_dict()),
-                        assignees=('employee', lambda x: list(x.unique()))
-                    ).reset_index()
-                    st.dataframe(project_summary, use_container_width=True)
-                else:
-                    st.info("No projects found yet.")
-            else:
-                st.info("No task data available for 360° performance overview.")
+    # --- Managerial Actions placeholder ---
+    with tab4:
+        st.subheader("Managerial Actions")
+        st.write("- Reassign tasks (not implemented in this minimal UI)")
+        st.write("- Approve leave (use Admin or leave listing)")
 
 # -----------------------------
 # TEAM MEMBER PORTAL
 # -----------------------------
 elif role == "Team Member":
-    st.header("👷 Team Member Portal: My Projects & Tasks")
-    tab1, tab2, tab3 = st.tabs(["My Tasks & Projects", "AI Feedback", "Submit Leave"])
+    st.header("👷 Team Member Portal")
+    tab1, tab2, tab3 = st.tabs(["My Tasks", "AI Feedback", "Submit Leave"])
 
-    # --- My Tasks ---
+    # --- My Tasks
     with tab1:
-        st.subheader("✅ My Assigned Tasks and Project Parts")
-        member_company = st.text_input("Company Name", key="member_company_task_tm")
-        member_name = st.text_input("Your Name", key="member_name_task_tm")
+        st.subheader("My Tasks")
+        company_tm = st.text_input("Company Name", key="tm_tasks_company")
+        employee_tm = st.text_input("Your Name", key="tm_tasks_name")
+        if st.button("Load Tasks", key="tm_load_btn"):
+            try:
+                res = index.query(vector=rand_vec(), top_k=500, include_metadata=True,
+                                  filter={"company": {"$eq": company_tm}, "employee": {"$eq": employee_tm}})
+                st.session_state["tm_tasks"] = [(m.id, m.metadata) for m in res.matches or []]
+                st.success(f"Loaded {len(st.session_state.get('tm_tasks',[]))} tasks.")
+            except Exception as e:
+                st.warning(f"Error: {e}")
 
-        if st.button("Load My Tasks", key="load_my_tasks_btn_tm"):
-            if not member_company or not member_name:
-                st.error("Please enter both Company and Your Name to load tasks.")
+        for tid, md in st.session_state.get("tm_tasks", []):
+            st.subheader(md.get("task"))
+            curr = float(md.get("completion", 0))
+            new = st.slider(f"Completion {md.get('task')}", 0, 100, int(curr), key=f"tm_slider_{tid}")
+            if st.button(f"Submit {md.get('task')}", key=f"tm_submit_{tid}"):
+                marks = float(lin_reg.predict([[new]])[0])
+                status = "On Track" if log_reg.predict([[new]])[0] == 1 else "Delayed"
+                miss = rf.predict([[new, 0]])[0]
+                md2 = {**md, "completion": new, "marks": marks, "status": status,
+                       "deadline_risk": "High" if miss else "Low", "submitted_on": now()}
+                safe_upsert(md2)
+                send_notification(md.get("email"), md.get("phone"), f"Task Update: {md.get('task')}", f"Updated to {new}%")
+                st.success("Update saved.")
+                safe_rerun()
+
+    # --- AI Feedback (automatic aggregator as alternative) ---
+    with tab2:
+        st.subheader("AI Feedback Summarization (Automatic)")
+        fb_company = st.text_input("Company Name (for summary)", key="tm_fb_company")
+        fb_employee = st.text_input("Your Name (for summary)", key="tm_fb_employee")
+        if st.button("Load & Analyze Feedback", key="tm_fb_load"):
+            if not fb_company or not fb_employee:
+                st.warning("Enter company and your name.")
             else:
                 try:
-                    res = index.query(
-                        vector=rand_vec(),
-                        top_k=200,
-                        include_metadata=True,
-                        filter={
-                            "company": {"$eq": member_company},
-                            "employee": {"$eq": member_name},
-                            "type": {"$eq": "task"}
-                        }
-                    )
-                    st.session_state["my_tasks_tm"] = [(m.id, m.metadata) for m in res.matches]
-                    if not st.session_state["my_tasks_tm"]:
-                        st.info("No tasks or project parts found for you.")
+                    res = index.query(vector=rand_vec(), top_k=500, include_metadata=True,
+                                      filter={"company": {"$eq": fb_company}, "employee": {"$eq": fb_employee}, "reviewed": {"$eq": True}})
+                    records = []
+                    for m in res.matches or []:
+                        md = m.metadata or {}
+                        records.append({
+                            "task": md.get("task", "Unnamed"),
+                            "manager_comments": md.get("comments", ""),
+                            "client_comments": md.get("client_comments", "")
+                        })
+                    df_fb = pd.DataFrame(records)
+                    if df_fb.empty:
+                        st.info("No feedback found.")
+                    else:
+                        combined = " ".join(df_fb["manager_comments"].fillna("") + " " + df_fb["client_comments"].fillna(""))
+                        blob = TextBlob(combined)
+                        polarity = blob.sentiment.polarity
+                        subjectivity = blob.sentiment.subjectivity
+                        sentiment = "Positive" if polarity > 0.2 else ("Negative" if polarity < -0.2 else "Neutral")
+                        st.markdown(f"### Sentiment: {sentiment}")
+                        st.markdown(f"Polarity: `{polarity:.3f}` | Subjectivity: `{subjectivity:.3f}`")
+                        st.progress((polarity + 1) / 2)
+                        st.write("Key themes:", ", ".join(blob.noun_phrases) or "None")
                 except Exception as e:
-                    st.error(f"Error loading your tasks: {e}")
-
-        if "my_tasks_tm" in st.session_state and st.session_state["my_tasks_tm"]:
-            for tid, md in st.session_state["my_tasks_tm"]:
-                st.markdown(f"#### 🏷️ {md.get('task')} (Status: {md.get('status', 'N/A')})")
-                if md.get('is_project_task'):
-                    st.write(f"**Project:** {md.get('project_title')}")
-                st.write(f"Description: {md.get('description')}")
-                st.write(f"Deadline: {md.get('deadline')}")
-                st.write(f"Assigned On: {md.get('assigned_on')}")
-                if md.get('manager_comments'):
-                    st.info(f"Manager's Comment: {md.get('manager_comments')}")
-                if md.get('approved_by_boss'):
-                    st.success("Manager Approved: Yes")
-                else:
-                    st.warning("Manager Approved: No")
-                if md.get('reassigned_from'):
-                    st.info(f"Reassigned from: {md.get('reassigned_from')} on {md.get('reassigned_on')}. Reason: {md.get('reassignment_reason', 'N/A')}")
-
-                with st.form(f"task_update_form_{tid}"):
-                    current_prog = int(md.get("completion", 0))
-                    prog = st.slider(f"Update Completion for '{md.get('task')}'", 0, 100, current_prog, key=f"prog_slider_{tid}")
-                    submit_task_update = st.form_submit_button(f"Submit Update for '{md.get('task')}'")
-
-                    if submit_task_update:
-                        marks = float(lin_reg.predict([[prog]])[0])
-                        track = "On Track" if log_reg.predict([[prog]])[0] == 1 else "Delayed"
-                        if prog == 100:
-                            track = "Completed"
-                        md2 = {**md, "completion": prog, "marks": marks, "status": track, "submitted_on": now()}
-                        if safe_upsert([md2]):
-                            st.success(f"✅ Updated '{md.get('task')}' to {prog}% ({track}).")
-                            safe_rerun()
-        elif "my_tasks_tm" in st.session_state:
-            st.info("No tasks found for you or please load your tasks.")
-
-    # --- AI Feedback ---
-    with tab2:
-        st.subheader("🧠 AI-Powered Self-Assessment & Feedback Summarization")
-        feedback_company = st.text_input("Company Name", key="feedback_company_input_tm")
-        feedback_employee = st.text_input("Your Name", key="feedback_employee_input_tm")
-        feedback_text = st.text_area("Enter your feedback or comments here for AI analysis:", key="feedback_text_area_tm")
-
-        if st.button("Analyze Feedback", key="analyze_feedback_btn_tm"):
-            if not feedback_text:
-                st.error("Please enter some feedback to analyze.")
-            else:
-                blob = TextBlob(feedback_text)
-                pol = blob.sentiment.polarity
-                sub = blob.sentiment.subjectivity
-
-                st.markdown(f"**Sentiment Analysis Results:**")
-                if pol > 0.1:
-                    st.success(f"Overall Sentiment: Positive 😊 (Polarity: {pol:.2f})")
-                elif pol < -0.1:
-                    st.error(f"Overall Sentiment: Negative 😞 (Polarity: {pol:.2f})")
-                else:
-                    st.info(f"Overall Sentiment: Neutral 😐 (Polarity: {pol:.2f})")
-
-                st.write(f"**Subjectivity**: {sub:.2f} (0.0 is objective, 1.0 is subjective - how much is it an opinion vs fact)")
-                if blob.noun_phrases:
-                    st.write(f"**Key Noun Phrases**: {', '.join(blob.noun_phrases)}")
-                else:
-                    st.write("No specific noun phrases identified.")
-
-                feedback_md = {
-                    "_id": str(uuid.uuid4()),
-                    "type": "feedback",
-                    "company": feedback_company,
-                    "employee": feedback_employee,
-                    "feedback_text": feedback_text,
-                    "sentiment_polarity": pol,
-                    "sentiment_subjectivity": sub,
-                    "analyzed_on": now()
-                 }
-                if safe_upsert([feedback_md]):
-                    st.success("Feedback analyzed and recorded.")
+                    st.warning(f"Error loading feedback: {e}")
 
     # --- Submit Leave ---
     with tab3:
-        st.subheader("🏖️ Submit Leave Request")
-        leave_company = st.text_input("Company Name", key="leave_company_input_tm")
-        leave_employee = st.text_input("Your Name", key="leave_employee_input_tm")
-        start_date = st.date_input("Start Date", key="leave_start_date_tm")
-        end_date = st.date_input("End Date", key="leave_end_date_tm")
-        leave_reason = st.text_area("Reason for Leave", key="leave_reason_text_tm")
-
-        if st.button("Submit Leave Request", key="submit_leave_btn_tm"):
-            if not leave_company or not leave_employee or not leave_reason:
-                st.error("Company, Your Name, and Reason for Leave are required.")
-            elif start_date > end_date:
-                st.error("End date cannot be before start date.")
+        st.subheader("Submit Leave Request")
+        leave_company = st.text_input("Company Name", key="tm_leave_company")
+        leave_name = st.text_input("Your Name", key="tm_leave_name")
+        start = st.date_input("Start Date", key="tm_leave_start")
+        end = st.date_input("End Date", key="tm_leave_end")
+        reason = st.text_area("Reason", key="tm_leave_reason")
+        if st.button("Submit Leave", key="tm_leave_submit"):
+            if not (leave_company and leave_name and reason):
+                st.warning("Please fill required fields.")
             else:
-                md = {
-                    "_id": str(uuid.uuid4()),
-                    "type": "leave",
-                    "company": leave_company,
-                    "employee": leave_
-                }
+                md = {"_id": str(uuid.uuid4()), "type": "leave", "company": leave_company,
+                      "employee": leave_name, "start_date": start.isoformat(), "end_date": end.isoformat(),
+                      "reason": reason, "status": "Pending", "requested_on": now()}
+                safe_upsert(md)
+                st.success("Leave submitted.")
+                safe_rerun()
+
+# -----------------------------
+# CLIENT REVIEW
+# -----------------------------
+elif role == "Client":
+    st.header("Client Review")
+    comp = st.text_input("Company Name", key="client_company")
+    if st.button("Load Tasks", key="client_load"):
+        try:
+            res = index.query(vector=rand_vec(), top_k=500, include_metadata=True,
+                              filter={"company": {"$eq": comp}})
+            st.session_state["client_tasks"] = [(m.id, m.metadata) for m in res.matches or []]
+            st.success(f"Loaded {len(st.session_state.get('client_tasks', []))} tasks.")
+        except Exception as e:
+            st.warning(f"Error: {e}")
+
+    for tid, md in st.session_state.get("client_tasks", []):
+        st.markdown(f"### {md.get('task', 'Unnamed Task')} — Employee: {md.get('employee', 'Unknown')}")
+        st.write(f"Completion: {md.get('completion', 0)}%")
+        st.write(f"Status: {md.get('status', 'In Process')}")
+        st.progress(int(md.get('completion', 0)))
+        comment = st.text_area(f"Client Feedback ({md.get('task')})", key=f"client_fb_{tid}")
+        if st.button(f"Submit Feedback {tid}", key=f"client_submit_{tid}"):
+            blob = TextBlob(comment)
+            polarity = blob.sentiment.polarity
+            sentiment = "Positive" if polarity > 0.1 else ("Negative" if polarity < -0.1 else "Neutral")
+            md2 = {**md, "client_reviewed": True, "client_comments": comment,
+                   "client_sentiment": sentiment, "client_polarity": polarity, "client_approved_on": now()}
+            safe_upsert(md2)
+            st.success(f"Saved feedback ({sentiment}).")
+            safe_rerun()
+
+# -----------------------------
+# ADMIN DASHBOARD
+# -----------------------------
+elif role == "Admin":
+    st.header("Admin Dashboard — HR & Analytics")
+    st.markdown("Organization-wide performance, top performers, leave overview, forecasting & alerts.")
+
+    df = fetch_all()
+    if df.empty:
+        st.info("No data available yet. Create/submit tasks to populate dashboard.")
+        # Demo data toggle
+        if st.button("Insert demo data for testing"):
+            demo = [
+                {"_id": str(uuid.uuid4()), "type": "task", "company": "ERP", "employee": "Alice", "department": "Tech", "completion": 90, "marks": 4.6, "month": current_month, "assigned_on": now()},
+                {"_id": str(uuid.uuid4()), "type": "task", "company": "ERP", "employee": "Bob", "department": "Design", "completion": 70, "marks": 3.8, "month": current_month, "assigned_on": now()},
+                {"_id": str(uuid.uuid4()), "type": "leave", "company": "ERP", "employee": "Clara", "start_date": now(), "end_date": now(), "reason": "Sick", "status": "Pending", "requested_on": now()}
+            ]
+            for r in demo: safe_upsert(r)
+            st.success("Demo data inserted. Refresh to view.")
+        st.stop()
+
+    # Ensure numeric fields exist
+    for c in ["marks", "completion"]:
+        if c not in df.columns:
+            df[c] = np.nan
+    df["marks"] = pd.to_numeric(df["marks"], errors="coerce")
+    df["completion"] = pd.to_numeric(df["completion"], errors="coerce")
+
+    # Department assignment for demo if missing
+    if "department" not in df.columns:
+        # assign random departments for visualization
+        df["department"] = np.random.choice(["Tech", "Design", "HR", "Sales", "Ops"], size=len(df))
+
+    # --- Department performance chart ---
+    st.subheader("Department-wise Performance")
+    dep_perf = df.groupby("department").agg({"marks": "mean", "completion": "mean"}).reset_index()
+    fig_dep = px.bar(dep_perf, x="department", y="marks", color="completion",
+                     title="Department Average Marks (color = completion)", text_auto=".2f")
+    st.plotly_chart(fig_dep, use_container_width=True)
+
+    # --- Top performers (weighted metric) ---
+    st.subheader("Top Performers")
+    if "employee" in df.columns:
+        df["score"] = 0.7 * df["marks"].fillna(0) + 0.3 * df["completion"].fillna(0)
+        top = df.groupby("employee")["score"].mean().reset_index().sort_values("score", ascending=False).head(10)
+        st.dataframe(top)
+        st.plotly_chart(px.bar(top, x="employee", y="score", title="Top employees (weighted)"), use_container_width=True)
+
+    # --- Leave overview ---
+    st.subheader("Leave Overview")
+    leaves = df[df["type"] == "leave"] if "type" in df.columns else pd.DataFrame()
+    if not leaves.empty:
+        st.dataframe(leaves[["employee", "company", "start_date", "end_date", "reason", "status", "requested_on"]])
+        leave_chart = leaves.groupby("company").size().reset_index(name="leave_requests")
+        st.plotly_chart(px.pie(leave_chart, names="company", values="leave_requests", title="Leave distribution by company"), use_container_width=True)
+    else:
+        st.info("No leave requests found.")
+
+    # --- Department heatmap by month (pivot) ---
+    st.subheader("Department Performance Heatmap")
+    if "month" not in df.columns:
+        # try to build month from dates if present
+        for dcol in ["assigned_on", "reviewed_on", "submitted_on", "requested_on"]:
+            if dcol in df.columns:
+                try:
+                    df["month"] = pd.to_datetime(df[dcol], errors="coerce").dt.to_period("M").astype(str)
+                    break
+                except Exception:
+                    pass
+        if "month" not in df.columns:
+            df["month"] = current_month
+
+    pivot = df.pivot_table(values="marks", index="department", columns="month", aggfunc="mean").fillna(0)
+    st.dataframe(pivot.style.background_gradient(cmap="Greens"))
+
+    # -----------------------------
+    # Forecasting & Alerts (linear trend + simple anomaly detection)
+    # -----------------------------
+    st.subheader("Forecasting & Alerts")
+    # Build timeseries with month -> avg marks per department
+    df_ts = df.copy()
+    # ensure month -> datetime period
+    try:
+        df_ts["_period"] = pd.to_datetime(df_ts["month"].astype(str) + "-01", errors="coerce")
+    except Exception:
+        df_ts["_period"] = pd.to_datetime(df_ts.get("month"), errors="coerce")
+    if df_ts["_period"].isna().all():
+        # fallback: use assigned_on/reviewed_on/submitted_on
+        for dcol in ["assigned_on", "reviewed_on", "submitted_on", "requested_on"]:
+            if dcol in df_ts.columns:
+                df_ts["_period"] = pd.to_datetime(df_ts[dcol], errors="coerce")
+                break
+    df_ts = df_ts.dropna(subset=["_period"])
+    if df_ts.empty:
+        st.info("Not enough dated records to forecast.")
+    else:
+        # choose aggregate level
+        agg_by_dept = st.checkbox("Aggregate by department (uncheck for overall)", value=True)
+        groups = df_ts.groupby("department") if (agg_by_dept and "department" in df_ts.columns) else [("ALL", df_ts)]
+
+        # plotting
+        fig = go.Figure()
+        colors = px.colors.qualitative.Dark24
+        alerts = []
+        FORECAST_MONTHS = st.sidebar.number_input("Forecast months", min_value=1, max_value=12, value=6)
+        ALERT_DROP_PCT = st.sidebar.slider("Alert drop % threshold", 5, 80, 20) / 100.0
+        Z_THRESH = st.sidebar.slider("Z-score threshold", 1, 4, 2)
+
+        for i, (gname, gdf) in enumerate(groups):
+            # prepare monthly aggregated series
+            monthly = gdf.groupby(gdf["_period"].dt.to_period("M")).agg({"marks": "mean"}).reset_index()
+            if monthly.empty: continue
+            monthly["_period"] = monthly["_period"].dt.to_timestamp()
+            monthly = monthly.sort_values("_period").reset_index(drop=True)
+            monthly["t"] = np.arange(len(monthly))
+            X = monthly[["t"]].values
+            y = monthly["marks"].values
+
+            # fit linear model if enough points
+            if len(X) >= 2:
+                lr = SklearnLinear()
+                lr.fit(X, y)
+                future_t = np.arange(len(monthly), len(monthly) + FORECAST_MONTHS).reshape(-1,1)
+                forecast = lr.predict(future_t)
+                last_period = monthly["_period"].max()
+                future_periods = pd.date_range(start=(last_period + pd.offsets.MonthBegin(1)), periods=FORECAST_MONTHS, freq="MS")
+                # trend over existing points
+                trend = lr.predict(X)
+            else:
+                # flat forecast
+                forecast = np.array([y[-1]] * FORECAST_MONTHS) if len(y) > 0 else np.array([])
+                last_period = monthly["_period"].max() if len(monthly)>0 else pd.Timestamp.now()
+                future_periods = pd.date_range(start=(last_period + pd.offsets.MonthBegin(1)), periods=FORECAST_MONTHS, freq="MS")
+                trend = y
+
+            # add traces
+            fig.add_trace(go.Scatter(x=monthly["_period"], y=monthly["marks"], mode="lines+markers",
+                                     name=f"{gname} actual", line=dict(color=colors[i % len(colors)])))
+            if len(X) >= 2:
+                fig.add_trace(go.Scatter(x=monthly["_period"], y=trend, mode="lines", name=f"{gname} trend",
+                                         line=dict(color=colors[i % len(colors)], dash="dash")))
+            if forecast.size:
+                fig.add_trace(go.Scatter(x=future_periods, y=forecast, mode="lines+markers", name=f"{gname} forecast",
+                                         line=dict(color=colors[i % len(colors)], dash="dot")))
+
+            # percent-drop alerts
+            for idx in range(1, len(monthly)):
+                prev = monthly.loc[idx-1, "marks"]
+                curr = monthly.loc[idx, "marks"]
+                if pd.notna(prev) and pd.notna(curr) and prev > 0:
+                    drop = (prev - curr) / prev
+                    if drop >= ALERT_DROP_PCT:
+                        alerts.append({"group": gname, "type": "Percent Drop", "month": monthly.loc[idx, "_period"].strftime("%Y-%m"),
+                                       "drop_pct": round(drop*100,1), "prev": round(prev,2), "curr": round(curr,2)})
+
+            # z-score anomalies
+            if len(y) >= 3:
+                mean_y = np.mean(y)
+                std_y = np.std(y, ddof=0)
+                if std_y > 0:
+                    zscores = (y - mean_y) / std_y
+                    for j, z in enumerate(zscores):
+                        if z <= -Z_THRESH:
+                            alerts.append({"group": gname, "type": "Z-Score Low", "month": monthly.loc[j, "_period"].strftime("%Y-%m"),
+                                           "zscore": round(z,2), "value": round(monthly.loc[j, "marks"],2)})
+
+        fig.update_layout(title="Actual Marks + Trend + Forecast", xaxis_title="Month", yaxis_title="Average Marks")
+        st.plotly_chart(fig, use_container_width=True)
+
+        if alerts:
+            st.subheader("Alerts detected")
+            st.dataframe(pd.DataFrame(alerts))
+            st.warning(f"{len(alerts)} alert(s) detected. Please review.")
+        else:
+            st.success("No anomalies detected.")
+
+# End of main.py
