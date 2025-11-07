@@ -8,8 +8,9 @@ from sklearn.cluster import KMeans
 import plotly.express as px
 import pathlib
 
-
-st.title("🏢 AI Enterprise Workforce — Stable Edition (Assign / Upload / Meetings)")
+# ------------- CONFIG -------------
+st.set_page_config(page_title="AI Workforce (Fixed)", layout="wide")
+st.title("🏢 AI Enterprise Workforce — Fixed Edition (Assign / Upload / Meetings)")
 
 # storage dir for uploaded files
 FILE_STORE_DIR = os.path.join(os.getcwd(), "ai_workforce_files")
@@ -24,16 +25,14 @@ try:
     if "PINECONE_API_KEY" in st.secrets:
         from pinecone import Pinecone
         pc = Pinecone(api_key=st.secrets["PINECONE_API_KEY"])
-        index = pc.Index("task")  # if index missing, it may error; we catch below
+        index = pc.Index("task")  # may fail if index doesn't exist; we catch below
         USE_PINECONE = True
 except Exception:
-    # no Pinecone — will use local session store
     USE_PINECONE = False
     index = None
 
 # ------------- SESSION STORAGE INITIALIZATION -------------
 if "store_df" not in st.session_state:
-    # columns include general task fields; meeting records have record_type == "meeting"
     st.session_state.store_df = pd.DataFrame(
         columns=[
             "_id", "record_type", "company", "department", "employee", "task", "completion",
@@ -45,7 +44,6 @@ if "store_df" not in st.session_state:
         ]
     )
 
-# convenience alias
 def local_df():
     return st.session_state.store_df
 
@@ -59,9 +57,25 @@ def save_uploaded_file(uploaded_file, prefix="file"):
         with open(out_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
         return out_path
-    except Exception as e:
-        st.error(f"Failed to save file: {e}")
+    except Exception:
         return None
+
+# ------------- SAFE FILTER HELPER (fixes KeyError) -------------
+def filter_by_type(df_obj, rtype):
+    """
+    Return rows where record_type == rtype.
+    If df_obj is empty or column missing, return empty DataFrame with same columns.
+    """
+    if not isinstance(df_obj, pd.DataFrame):
+        return pd.DataFrame()
+    if df_obj.empty:
+        return pd.DataFrame(columns=df_obj.columns)
+    if "record_type" not in df_obj.columns:
+        return pd.DataFrame(columns=df_obj.columns)
+    try:
+        return df_obj[df_obj["record_type"] == rtype].copy()
+    except Exception:
+        return pd.DataFrame(columns=df_obj.columns)
 
 # ------------- Data API: unified interface to Pinecone or local -------------
 def fetch_all():
@@ -76,52 +90,47 @@ def fetch_all():
                 rows.append(meta)
             return pd.DataFrame(rows)
         except Exception:
-            # fallback to local
             return local_df().copy()
     else:
         return local_df().copy()
 
 def upsert_records(records):
     """
-    records: list of dicts. If dict contains '_id' we update that record. Otherwise create.
-    This updates local session store and, if Pinecone available, attempts Pinecone upsert.
+    Upsert into local df and attempt Pinecone upsert (best-effort).
+    Each record must be a dict. If record contains '_id', it updates that row; otherwise new id.
     """
     df = local_df()
-    changed = False
     for rec in records:
-        rec = dict(rec)  # copy
+        rec = dict(rec)
         rec_id = rec.get("_id") or str(uuid.uuid4())
         rec["_id"] = rec_id
-        # normalize fields: ensure columns exist
-        for c in rec.keys():
-            if c not in df.columns:
-                df[c] = None
-        # if exists in local df -> update row; else append
+        # ensure columns exist
+        for k in rec.keys():
+            if k not in df.columns:
+                df[k] = None
         if (df["_id"] == rec_id).any():
-            df.loc[df["_id"] == rec_id, list(rec.keys())] = list(rec.values())
+            # update existing row (only keys present in rec)
+            for k, v in rec.items():
+                df.loc[df["_id"] == rec_id, k] = v
         else:
             df = pd.concat([df, pd.DataFrame([rec])], ignore_index=True, sort=False)
-        changed = True
-
-    # clean up DataFrame index
     st.session_state.store_df = df.reset_index(drop=True)
 
-    # attempt Pinecone upsert (best-effort, silent failure)
+    # attempt pinecone upsert silently
     if USE_PINECONE and index is not None:
         try:
             batch = []
             for rec in records:
                 rec_copy = dict(rec)
                 pc_id = rec_copy.pop("_id")
-                vector = np.random.rand(DIMENSION).tolist()  # placeholder
+                vector = np.random.rand(DIMENSION).tolist()
                 batch.append({"id": pc_id, "values": vector, "metadata": rec_copy})
             index.upsert(batch)
         except Exception:
             pass
+    return True
 
-    return changed
-
-# initialize local data variable for display
+# initial fetch
 df = fetch_all()
 
 # ------------- Sidebar: role selection -------------
@@ -132,7 +141,7 @@ role = st.sidebar.radio("Choose Role", ["Manager", "Team Member", "Client", "Adm
 def compute_marks_and_status(completion):
     try:
         comp = float(completion)
-    except:
+    except Exception:
         comp = 0.0
     marks = round(comp * 0.05, 2)
     status = "On Track" if comp >= 60 else ("Delayed" if comp < 30 else "At Risk")
@@ -184,7 +193,7 @@ if role == "Manager":
 
         else:
             st.write("Select a task to update")
-            df_tasks = df[df.get("record_type") == "task"] if not df.empty else pd.DataFrame()
+            df_tasks = filter_by_type(df, "task")
             if df_tasks.empty:
                 st.info("No tasks available to update.")
             else:
@@ -223,7 +232,7 @@ if role == "Manager":
     # ---------- Review Tasks ----------
     with tabs[1]:
         st.subheader("🧾 Review Pending Tasks")
-        df_tasks = df[df.get("record_type") == "task"] if not df.empty else pd.DataFrame()
+        df_tasks = filter_by_type(df, "task")
         if df_tasks.empty:
             st.info("No tasks.")
         else:
@@ -280,7 +289,7 @@ if role == "Manager":
                 st.success("Meeting scheduled")
                 df = fetch_all()
         else:
-            meetings = df[df.get("record_type") == "meeting"] if not df.empty else pd.DataFrame()
+            meetings = filter_by_type(df, "meeting")
             if meetings.empty:
                 st.info("No meetings scheduled")
             else:
@@ -302,14 +311,12 @@ if role == "Manager":
     # ---------- Overview ----------
     with tabs[3]:
         st.subheader("📊 Quick Overview")
-        df_tasks = df[df.get("record_type") == "task"] if not df.empty else pd.DataFrame()
+        df_tasks = filter_by_type(df, "task")
         if df_tasks.empty:
             st.info("No tasks to show")
         else:
-            # simple metrics
             st.metric("Total Tasks", len(df_tasks))
             st.metric("Pending Review", int((df_tasks.get("reviewed") != True).sum()))
-            # cluster plot if enough rows
             try:
                 num_df = df_tasks.dropna(subset=["marks", "completion"]).copy()
                 num_df["marks"] = pd.to_numeric(num_df["marks"], errors="coerce")
@@ -332,13 +339,14 @@ elif role == "Team Member":
     # My Tasks
     with tabs[0]:
         st.subheader("📋 Your Tasks")
-        if df.empty or "employee" not in df.columns:
+        df_tasks_all = filter_by_type(df, "task")
+        if df_tasks_all.empty or "employee" not in df_tasks_all.columns:
             st.info("No tasks available.")
         else:
-            emp_list = sorted(df["employee"].dropna().unique())
+            emp_list = sorted(df_tasks_all["employee"].dropna().unique())
             emp_name = st.selectbox("Select your name", options=emp_list)
             if emp_name:
-                my_tasks = df[(df.get("record_type") == "task") & (df.get("employee") == emp_name)]
+                my_tasks = df_tasks_all[df_tasks_all.get("employee") == emp_name]
                 if my_tasks.empty:
                     st.info("No tasks assigned.")
                 else:
@@ -377,13 +385,15 @@ elif role == "Team Member":
     with tabs[2]:
         st.subheader("📅 Meetings you're in")
         my_name = st.text_input("Enter your name to filter meetings (optional)", key="tm_meet_filter")
-        meetings = df[df.get("record_type") == "meeting"] if not df.empty else pd.DataFrame()
+        meetings = filter_by_type(df, "meeting")
         if meetings.empty:
             st.info("No meetings scheduled")
         else:
             if my_name:
-                meetings = meetings[meetings.get("participants", "").str.lower().str.contains(my_name.lower(), na=False) |
-                                     meetings.get("organizer", "").str.lower().str.contains(my_name.lower(), na=False)]
+                meetings = meetings[
+                    meetings.get("participants", "").str.lower().str.contains(my_name.lower(), na=False) |
+                    meetings.get("organizer", "").str.lower().str.contains(my_name.lower(), na=False)
+                ]
             for i, m in meetings.iterrows():
                 st.markdown(f"**{m.get('meeting_title')}** — {m.get('meeting_datetime')}")
                 st.write(f"Organizer: {m.get('organizer')}")
@@ -411,18 +421,22 @@ elif role == "Client":
     tabs = st.tabs(["Project Overview", "Approve Tasks", "Meetings"])
     with tabs[0]:
         st.subheader("Project Overview")
-        df_tasks = df[df.get("record_type") == "task"] if not df.empty else pd.DataFrame()
+        df_tasks = filter_by_type(df, "task")
         if df_tasks.empty:
             st.info("No task data")
         else:
-            comps = sorted(df_tasks["company"].dropna().unique())
-            comp = st.selectbox("Select Company", options=comps)
-            comp_df = df_tasks[df_tasks["company"] == comp]
-            cols = [c for c in ["employee", "task", "completion", "marks", "status", "work_attachment"] if c in comp_df.columns]
-            st.dataframe(comp_df[cols])
+            comps = sorted(df_tasks["company"].dropna().unique()) if "company" in df_tasks.columns else []
+            if comps:
+                comp = st.selectbox("Select Company", options=comps)
+                comp_df = df_tasks[df_tasks["company"] == comp]
+                cols = [c for c in ["employee", "task", "completion", "marks", "status", "work_attachment"] if c in comp_df.columns]
+                st.dataframe(comp_df[cols])
+            else:
+                st.info("No company data in tasks")
+
     with tabs[1]:
         st.subheader("Approve Reviewed Tasks")
-        df_tasks = df[df.get("record_type") == "task"] if not df.empty else pd.DataFrame()
+        df_tasks = filter_by_type(df, "task")
         ready = df_tasks[df_tasks.get("reviewed") == True]
         if ready.empty:
             st.info("No tasks ready for client approval")
@@ -435,9 +449,10 @@ elif role == "Client":
                     upsert_records([updated])
                     st.success("Approved")
                     df = fetch_all()
+
     with tabs[2]:
         st.subheader("Meetings")
-        meetings = df[df.get("record_type") == "meeting"] if not df.empty else pd.DataFrame()
+        meetings = filter_by_type(df, "meeting")
         if meetings.empty:
             st.info("No meetings")
         else:
@@ -446,7 +461,7 @@ elif role == "Client":
 # ------------- ADMIN UI -------------
 elif role == "Admin":
     st.header("🧠 Admin — Global Overview")
-    df_tasks = df[df.get("record_type") == "task"] if not df.empty else pd.DataFrame()
+    df_tasks = filter_by_type(df, "task")
     st.metric("Total Records", len(df))
     st.metric("Total Tasks", len(df_tasks))
     if not df_tasks.empty and {"marks","completion","employee"} <= set(df_tasks.columns):
@@ -459,6 +474,5 @@ elif role == "Admin":
         except Exception:
             st.info("Leaderboard unavailable")
 
-# ------------- FOOTER -------------
 st.markdown("---")
-st.caption("Stable edition: meeting scheduling + file upload + assign/reassign. If you still get errors, paste the traceback here and I will fix it immediately.")
+st.caption("Fixed edition: avoids KeyError when optional columns are missing. If you still see an error, paste the exact traceback (full text) and I will patch immediately.")
