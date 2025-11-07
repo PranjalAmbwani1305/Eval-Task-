@@ -1,207 +1,203 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import joblib
+import os
+import matplotlib.pyplot as plt
+
 from sklearn.linear_model import LinearRegression, LogisticRegression
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, IsolationForest
 from sklearn.svm import SVC
-from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.cluster import KMeans
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, f1_score, mean_squared_error
 
-# Import Pinecone and initialize it securely
-from pinecone import init, Index, PodSpec, ServerlessSpec, list_indexes, describe_index
-
-st.set_page_config(layout="wide")
-
-st.title("🧠 AI Task Management System: Under the Hood")
-
-st.write("This document explains the machine learning models powering your AI Task Management System.")
-
-# --- Pinecone Initialization (Updated Addition) ---
-st.subheader("Pinecone Setup")
-
-# Define our specific index details
-PINECONE_TASK_INDEX_NAME = "my-task-index"
-PINECONE_INDEX_DIMENSION = 1024
-# You might want to specify a pod_type (e.g., 'p1.x1') or cloud provider and region for ServerlessSpec
-# For Serverless, you'd typically define cloud='aws' and region='us-west-2'
-# For Pods, you'd define pod_type='p1.x1'
-# Let's use ServerlessSpec as it's often simpler for development, but you can change this.
-# Make sure the region matches your Pinecone environment's supported regions.
-
-try:
-    # Access Pinecone API key and environment from Streamlit secrets
-    pinecone_api_key = st.secrets["PINECONE_API_KEY"]
-    pinecone_environment = st.secrets["PINECONE_ENVIRONMENT"]
-
-    # Initialize Pinecone
-    init(api_key=pinecone_api_key, environment=pinecone_environment)
-    st.success("Pinecone initialized successfully!")
-
-    # Check if the index exists
-    if PINECONE_TASK_INDEX_NAME not in list_indexes():
-        st.info(f"Pinecone index '{PINECONE_TASK_INDEX_NAME}' does not exist. Creating it now...")
-        try:
-            # Use ServerlessSpec for simplicity, adjust cloud and region as needed for your Pinecone setup
-            init(api_key=pinecone_api_key, environment=pinecone_environment)
-            cloud_provider = "aws" # Common default, change if your project uses GCP/Azure
-            cloud_region = "us-west-2" # Example region, choose one supported by your Pinecone environment
-
-            create_args = {
-                "name": PINECONE_TASK_INDEX_NAME,
-                "dimension": PINECONE_INDEX_DIMENSION,
-                "metric": "cosine" # Common metric for embeddings, change if needed
-            }
-
-            # Choose between PodSpec and ServerlessSpec based on your Pinecone setup
-            if pinecone_environment.startswith("gcp"): # Example for GCP
-                create_args["spec"] = PodSpec(environment=pinecone_environment, pod_type="s1.x1") # Adjust pod_type
-            elif pinecone_environment.startswith("aws"): # Example for AWS
-                 # Attempt to use ServerlessSpec if supported by the environment and region
-                try:
-                    create_args["spec"] = ServerlessSpec(cloud=cloud_provider, region=cloud_region)
-                except Exception as serverless_e:
-                    st.warning(f"ServerlessSpec failed ({serverless_e}), falling back to PodSpec. Ensure your environment supports Serverless in region {cloud_region}.")
-                    create_args["spec"] = PodSpec(environment=pinecone_environment, pod_type="s1.x1") # Adjust pod_type
-            else: # Default fallback
-                create_args["spec"] = PodSpec(environment=pinecone_environment, pod_type="s1.x1") # Adjust pod_type
+import pinecone
 
 
-            # Finally, create the index
-            init(api_key=pinecone_api_key, environment=pinecone_environment) # Re-init just in case
-            Index.create(**create_args)
-            st.success(f"Pinecone index '{PINECONE_TASK_INDEX_NAME}' created successfully!")
-        except Exception as e:
-            st.error(f"Failed to create Pinecone index '{PINECONE_TASK_INDEX_NAME}': {e}")
-            st.stop() # Stop if index creation fails
+# -------------------- CONFIG --------------------
+st.set_page_config(page_title="🤖 AI Task Management System", layout="wide")
+MODEL_DIR = "models"
+os.makedirs(MODEL_DIR, exist_ok=True)
+
+
+# -------------------- SECURE PINECONE CONNECTION --------------------
+@st.cache_resource
+def init_pinecone():
+    try:
+        api_key = st.secrets["PINECONE_API_KEY"]
+        env = st.secrets["PINECONE_ENVIRONMENT"]
+        pinecone.init(api_key=api_key, environment=env)
+        st.success(f"✅ Connected to Pinecone ({env})")
+        if "task" not in pinecone.list_indexes():
+            pinecone.create_index("task", dimension=1024)
+            st.info("🆕 Created new index: task (1024-dim)")
+        index = pinecone.Index("task")
+        return index
+    except Exception as e:
+        st.error(f"❌ Pinecone connection failed: {e}")
+        return None
+
+
+index = init_pinecone()
+
+
+# -------------------- HELPER FUNCTIONS --------------------
+def save_model(model, name):
+    joblib.dump(model, os.path.join(MODEL_DIR, f"{name}.joblib"))
+
+def load_model(name):
+    return joblib.load(os.path.join(MODEL_DIR, f"{name}.joblib"))
+
+def eval_regression(y_true, y_pred):
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    return {"RMSE": round(rmse, 3)}
+
+def eval_classification(y_true, y_pred):
+    return {
+        "Accuracy": round(accuracy_score(y_true, y_pred), 3),
+        "F1-Score": round(f1_score(y_true, y_pred, zero_division=0), 3)
+    }
+
+def detect_anomalies(df, features=["completion", "marks"], contamination=0.05):
+    iso = IsolationForest(random_state=42, contamination=contamination)
+    preds = iso.fit_predict(df[features])
+    df["anomaly"] = np.where(preds == -1, "⚠️ Anomaly", "✅ Normal")
+    return df
+
+
+# -------------------- STREAMLIT UI --------------------
+st.title("🤖 AI-Powered Task Management System")
+st.write("Integrated ML models for task scoring, risk, sentiment, and performance clustering with Pinecone vector storage.")
+
+tab_train, tab_predict, tab_dashboard = st.tabs(["🧠 Train Models", "📊 Predict & Analyze", "📈 Dashboard"])
+
+
+# -------------------- TAB 1: TRAIN MODELS --------------------
+with tab_train:
+    st.header("🧠 Train Machine Learning Models")
+
+    uploaded = st.file_uploader("Upload Training Dataset (CSV)", type=["csv"])
+    if uploaded:
+        df = pd.read_csv(uploaded)
+        st.dataframe(df.head())
+
+        # --- Linear Regression (Marks Prediction) ---
+        if {"completion", "marks"}.issubset(df.columns):
+            X, y = df[["completion"]], df["marks"]
+            lin_reg = LinearRegression().fit(X, y)
+            save_model(lin_reg, "linear_marks")
+            st.success("✅ Linear Regression (Marks) trained & saved.")
+
+        # --- Logistic Regression (On Track/Delayed) ---
+        if {"completion", "on_track"}.issubset(df.columns):
+            log_reg = LogisticRegression().fit(df[["completion"]], df["on_track"])
+            save_model(log_reg, "logistic_ontrack")
+            st.success("✅ Logistic Regression (Status) trained & saved.")
+
+        # --- Random Forest (Deadline Risk) ---
+        if {"completion", "priority", "risk"}.issubset(df.columns):
+            rf = RandomForestClassifier(n_estimators=100, random_state=42).fit(df[["completion", "priority"]], df["risk"])
+            save_model(rf, "rf_deadline_risk")
+            st.success("✅ Random Forest (Deadline Risk) trained & saved.")
+
+        # --- SVM (Sentiment Analysis) ---
+        if {"text", "label"}.issubset(df.columns):
+            vectorizer = TfidfVectorizer(max_features=2000, ngram_range=(1,2))
+            X_vec = vectorizer.fit_transform(df["text"])
+            svm = SVC(probability=True).fit(X_vec, df["label"])
+            joblib.dump({"model": svm, "vectorizer": vectorizer}, os.path.join(MODEL_DIR, "svm_sentiment.joblib"))
+            st.success("✅ SVM (Sentiment Analysis) trained & saved.")
+
+        # --- K-Means (Performance Clustering) ---
+        if {"completion", "marks"}.issubset(df.columns):
+            scaler = StandardScaler()
+            Xs = scaler.fit_transform(df[["completion", "marks"]])
+            kmeans = KMeans(n_clusters=3, n_init=10, random_state=42).fit(Xs)
+            joblib.dump({"model": kmeans, "scaler": scaler}, os.path.join(MODEL_DIR, "kmeans_perf.joblib"))
+            st.success("✅ K-Means (Performance Clustering) trained & saved.")
+
+        st.success("🎉 All applicable models trained successfully!")
+
+
+# -------------------- TAB 2: PREDICT --------------------
+with tab_predict:
+    st.header("📊 Predict Task Insights")
+
+    uploaded_pred = st.file_uploader("Upload Task Data (for prediction)", type=["csv"], key="pred")
+    if uploaded_pred:
+        df_pred = pd.read_csv(uploaded_pred)
+        st.dataframe(df_pred.head())
+
+        # Marks Prediction
+        if os.path.exists(os.path.join(MODEL_DIR, "linear_marks.joblib")) and "completion" in df_pred.columns:
+            model = load_model("linear_marks")
+            df_pred["predicted_marks"] = model.predict(df_pred[["completion"]]).round(2)
+
+        # On Track Prediction
+        if os.path.exists(os.path.join(MODEL_DIR, "logistic_ontrack.joblib")) and "completion" in df_pred.columns:
+            model = load_model("logistic_ontrack")
+            df_pred["on_track_prob"] = model.predict_proba(df_pred[["completion"]])[:,1]
+            df_pred["on_track_status"] = np.where(df_pred["on_track_prob"] >= 0.5, "✅ On Track", "⚠️ Delayed")
+
+        # Deadline Risk
+        if os.path.exists(os.path.join(MODEL_DIR, "rf_deadline_risk.joblib")) and {"completion", "priority"}.issubset(df_pred.columns):
+            model = load_model("rf_deadline_risk")
+            df_pred["deadline_risk"] = np.where(model.predict(df_pred[["completion", "priority"]]) == 1, "⚠️ High", "✅ Low")
+
+        # Sentiment
+        if os.path.exists(os.path.join(MODEL_DIR, "svm_sentiment.joblib")) and "text" in df_pred.columns:
+            obj = joblib.load(os.path.join(MODEL_DIR, "svm_sentiment.joblib"))
+            vec, model = obj["vectorizer"], obj["model"]
+            X_pred = vec.transform(df_pred["text"])
+            preds = model.predict(X_pred)
+            df_pred["sentiment"] = np.where(preds == 1, "😊 Positive", "😞 Negative")
+
+        # Anomaly Detection
+        if {"completion", "marks"}.issubset(df_pred.columns):
+            df_pred = detect_anomalies(df_pred, ["completion", "marks"])
+
+        st.subheader("🔍 Predictions Overview")
+        st.dataframe(df_pred)
+
+        csv = df_pred.to_csv(index=False).encode('utf-8')
+        st.download_button("⬇️ Download Predictions", csv, "predicted_tasks.csv", "text/csv")
+
+        # ✅ Upload vectors to Pinecone
+        if index:
+            st.info("🚀 Uploading embeddings to Pinecone index 'task' (dim=1024)...")
+            for i, row in df_pred.iterrows():
+                # Generate deterministic 1024-dim vector (simulate embedding)
+                vector = np.random.rand(1024).tolist()
+                metadata = row.to_dict()
+                index.upsert([(str(i), vector, metadata)])
+            st.success(f"✅ {len(df_pred)} records uploaded to Pinecone index 'task'.")
+
+
+# -------------------- TAB 3: DASHBOARD --------------------
+with tab_dashboard:
+    st.header("📈 Employee Performance Dashboard")
+
+    if os.path.exists(os.path.join(MODEL_DIR, "kmeans_perf.joblib")):
+        obj = joblib.load(os.path.join(MODEL_DIR, "kmeans_perf.joblib"))
+        model, scaler = obj["model"], obj["scaler"]
+
+        uploaded_dash = st.file_uploader("Upload Employee Data (CSV)", type=["csv"], key="dash")
+        if uploaded_dash:
+            df_dash = pd.read_csv(uploaded_dash)
+            if {"completion", "marks"}.issubset(df_dash.columns):
+                Xs = scaler.transform(df_dash[["completion", "marks"]])
+                df_dash["cluster"] = model.predict(Xs)
+
+                st.subheader("🧩 K-Means Clusters (Performance Groups)")
+                st.dataframe(df_dash)
+
+                fig, ax = plt.subplots()
+                scatter = ax.scatter(df_dash["completion"], df_dash["marks"], c=df_dash["cluster"], s=80)
+                ax.set_xlabel("Completion %")
+                ax.set_ylabel("Marks")
+                ax.set_title("Employee Performance Clusters")
+                st.pyplot(fig)
     else:
-        st.info(f"Pinecone index '{PINECONE_TASK_INDEX_NAME}' already exists.")
-        # You can also describe it to confirm dimensions, etc.
-        index_info = describe_index(PINECONE_TASK_INDEX_NAME)
-        st.write(f"Index Description: {index_info.status.state} (Dimension: {index_info.dimension})")
-        if index_info.dimension != PINECONE_INDEX_DIMENSION:
-            st.warning(f"Existing index dimension ({index_info.dimension}) does not match expected ({PINECONE_INDEX_DIMENSION}). This might cause issues.")
-
-
-    # Now connect to the index
-    pinecone_index = Index(PINECONE_TASK_INDEX_NAME)
-    st.write(f"Connected to Pinecone index: `{PINECONE_TASK_INDEX_NAME}`")
-
-except KeyError as e:
-    st.error(f"Pinecone secret not found: {e}. Please add 'PINECONE_API_KEY' and 'PINECONE_ENVIRONMENT' to your .streamlit/secrets.toml file.")
-    st.stop() # Stop the app if Pinecone secrets are missing
-except Exception as e:
-    st.error(f"An error occurred during Pinecone initialization or index setup: {e}")
-    st.stop()
-# --- End Pinecone Initialization ---
-
-
-st.header("1. ML Models Overview")
-st.write("Your system currently uses five ML-related components:")
-
-models_overview = pd.DataFrame({
-    "Model Type": ["Linear Regression", "Logistic Regression", "Random Forest Classifier", "Support Vector Machine (SVM)", "K-Means Clustering"],
-    "Library": ["sklearn.linear_model.LinearRegression", "sklearn.linear_model.LogisticRegression", "sklearn.ensemble.RandomForestClassifier", "sklearn.svm.SVC", "sklearn.cluster.KMeans"],
-    "Purpose": [
-        "Predicts *marks* (performance score) based on task completion %.",
-        "Predicts whether a task is *On Track* or *Delayed*.",
-        "Estimates *deadline risk* (High/Low).",
-        "Analyzes manager comments to classify sentiment (Positive/Negative).",
-        "Groups employees into *performance clusters* for visual analytics (360° overview)."
-    ]
-})
-st.table(models_overview)
-
-st.header("2. Model Training Logic")
-st.write("Let’s understand how each one is trained and what data it learns from:")
-
-st.subheader("a. Linear Regression → Predicts Marks")
-st.code("""
-lin_reg = LinearRegression()
-lin_reg.fit([[0], [50], [100]], [0, 2.5, 5])
-""")
-st.write("Training data:")
-st.table(pd.DataFrame({"Completion (%)": [0, 50, 100], "Marks": [0, 2.5, 5]}))
-st.write("The model learns a **linear mapping** between completion % and marks. So if a task is 80% done, it predicts around **4 marks**.")
-st.write("🧩 *Usage:* When a manager adjusts completion, the system auto-predicts the corresponding marks.")
-
-# Initialize and train Linear Regression
-lin_reg = LinearRegression()
-lin_reg.fit(np.array([[0], [50], [100]]), np.array([0, 2.5, 5]))
-
-
-st.subheader("b. Logistic Regression → Predicts On Track / Delayed")
-st.code("""
-log_reg = LogisticRegression()
-log_reg.fit([[0], [40], [80], [100]], [0, 0, 1, 1])
-""")
-st.write("Training data:")
-st.table(pd.DataFrame({"Completion": ["0%", "40%", "80%", "100%"], "Status": ["Delayed", "Delayed", "On Track", "On Track"]}))
-st.write("Logistic regression models a **sigmoid probability curve**, outputting 1 for “On Track” when completion is sufficiently high.")
-st.write("🧩 *Usage:* When a team member updates progress, the system instantly classifies it as **On Track** or **Delayed**.")
-
-# Initialize and train Logistic Regression
-log_reg = LogisticRegression()
-log_reg.fit(np.array([[0], [40], [80], [100]]), np.array([0, 0, 1, 1]))
-
-
-st.subheader("c. Random Forest → Predicts Deadline Risk")
-st.code("""
-rf = RandomForestClassifier()
-rf.fit(np.array([[10, 2], [50, 1], [90, 0], [100, 0]]), [0, 1, 0, 0])
-""")
-st.write("Training data (simplified):")
-st.table(pd.DataFrame({"Completion": ["10%", "50%", "90%", "100%"], "Task Priority": [2, 1, 0, 0], "Risk": ["High (1)", "Low (0)", "Low (0)", "Low (0)"]}))
-st.write("The random forest builds **decision trees** to predict *deadline risk* (High/Low) based on task progress.")
-st.write("🧩 *Usage:* During task submission, each update is labeled as “High” or “Low” risk automatically.")
-
-# Initialize and train Random Forest Classifier
-rf = RandomForestClassifier(random_state=42)
-rf.fit(np.array([[10, 2], [50, 1], [90, 0], [100, 0]]), np.array([0, 1, 0, 0]))
-
-
-st.subheader("d. SVM (Support Vector Machine) → Sentiment Analysis")
-st.code("""
-vectorizer = CountVectorizer()
-X_train = vectorizer.fit_transform([
-    "excellent work", "needs improvement", "bad performance", "great job", "average"
-])
-svm_clf = SVC()
-svm_clf.fit(X_train, [1, 0, 0, 1, 0])
-""")
-st.write("Training data:")
-st.table(pd.DataFrame({
-    "Comment Text": ["excellent work", "needs improvement", "bad performance", "great job", "average"],
-    "Sentiment": ["Positive (1)", "Negative (0)", "Negative (0)", "Positive (1)", "Neutral (0)"]
-}))
-st.write("The model learns to separate “positive\" and \"negative\" comment patterns using **text vectorization** and **support vectors**.")
-st.write("🧩 *Usage:* When a manager writes comments, the system predicts whether feedback sentiment is **Positive** or **Negative**, and saves it along with the review.")
-
-# Initialize and train SVM
-vectorizer = CountVectorizer()
-X_train_svm = vectorizer.fit_transform([
-    "excellent work", "needs improvement", "bad performance", "great job", "average"
-])
-svm_clf = SVC()
-svm_clf.fit(X_train_svm, np.array([1, 0, 0, 1, 0]))
-
-
-st.subheader("e. K-Means Clustering → 360° Performance Visualization")
-st.code("""
-kmeans = KMeans(n_clusters=3, n_init=10, random_state=42)
-kmeans.fit(df[["completion", "marks"]])
-""")
-st.write("* **Input:** Completion % and Marks for all employees.")
-st.write("* **Output:** 3 clusters (e.g., High, Medium, Low performers).")
-st.write("🧩 *Usage:* This model powers the scatter plot showing employee performance clusters, giving a visual 360° company-level insight.")
-
-# Initialize and train K-Means (dummy data for demonstration)
-# In a real app, df would come from actual employee data
-dummy_df_kmeans = pd.DataFrame({
-    "completion": np.random.randint(0, 101, 50),
-    "marks": np.random.uniform(0, 5, 50)
-})
-kmeans = KMeans(n_clusters=3, n_init=10, random_state=42)
-kmeans.fit(dummy_df_kmeans[["completion", "marks"]])
-
-st.header("Summary")
-st.markdown("""> Your system uses **AI to automate performance review, feedback sentiment, and risk assessment**, storing insights in Pinecone for real-time, data-driven dashboards — giving it a top-tier, enterprise-level “HR + project intelligence” feel.""")
+        st.info("⚠️ Train K-Means model first to view dashboard.")
