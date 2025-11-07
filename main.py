@@ -1,10 +1,7 @@
-# app.py
-# 🚀 AI Enterprise Workforce & Task Management — Final Stable Enterprise Build
-
 import streamlit as st
 import numpy as np
 import pandas as pd
-import uuid, os
+import uuid
 from datetime import date, datetime, timedelta
 import plotly.express as px
 from sklearn.linear_model import LinearRegression, LogisticRegression
@@ -13,24 +10,25 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.svm import SVC
 
-# ----------------------------
+# -------------------------------------
 # PAGE CONFIG
-# ----------------------------
+# -------------------------------------
 st.set_page_config(page_title="AI Enterprise Workforce System", layout="wide")
 st.title("🏢 AI Enterprise Workforce & Task Management — Enterprise Edition")
 
-# ----------------------------
-# ROLE SELECTION (No login)
-# ----------------------------
+# -------------------------------------
+# ROLE SELECTION (No Login Required)
+# -------------------------------------
 role = st.sidebar.selectbox("Login as", ["Manager", "Team Member", "Client", "Admin"])
 
-# ----------------------------
+# -------------------------------------
 # LOCAL STORAGE
-# ----------------------------
+# -------------------------------------
 if "data" not in st.session_state:
     st.session_state["data"] = []
 
-def now_str(): return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+def now_str():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 def save_record(rec):
     st.session_state["data"].append(rec)
@@ -45,19 +43,19 @@ def get_records(filter_by=None):
                 continue
     return df if not df.empty else pd.DataFrame()
 
-# ----------------------------
+# -------------------------------------
 # SIMPLE ML MODELS (AI Logic)
-# ----------------------------
+# -------------------------------------
 lin_reg = LinearRegression().fit([[0], [50], [100]], [0, 2.5, 5])
 log_reg = LogisticRegression().fit([[0], [40], [80], [100]], [0, 0, 1, 1])
-rf = RandomForestClassifier().fit(np.array([[10,2],[50,1],[90,0],[100,0]]), [1,0,0,0])
+rf = RandomForestClassifier().fit(np.array([[10, 2], [50, 1], [90, 0], [100, 0]]), [1, 0, 0, 0])
 vec = CountVectorizer()
 X = vec.fit_transform(["excellent work", "bad performance", "great job", "needs improvement", "average"])
 svm = SVC().fit(X, [1, 0, 1, 0, 0])
 
-# ----------------------------
+# -------------------------------------
 # MANAGER DASHBOARD
-# ----------------------------
+# -------------------------------------
 if role == "Manager":
     st.header("👨‍💼 Manager Dashboard")
 
@@ -66,7 +64,7 @@ if role == "Manager":
         "🏢 Inner Department", "🌐 360° Overview", "🏖 Leave Requests"
     ])
 
-    # ---------------- Assign / Reassign ----------------
+    # Assign / Reassign
     with tab1:
         st.subheader("Assign New Task")
         with st.form("assign_form"):
@@ -105,7 +103,7 @@ if role == "Manager":
             else:
                 st.warning("No tasks found for reassignment.")
 
-    # ---------------- Review Tasks ----------------
+    # Review Tasks
     with tab2:
         st.subheader("🧾 Review Tasks")
         company = st.text_input("Company to Review")
@@ -130,7 +128,7 @@ if role == "Manager":
             else:
                 st.warning("No tasks found.")
 
-    # ---------------- Inner Department ----------------
+    # Inner Department
     with tab3:
         st.subheader("🏢 Departmental Insights")
         df = get_records()
@@ -145,7 +143,7 @@ if role == "Manager":
         else:
             st.info("No data available.")
 
-    # ---------------- 360 Overview ----------------
+    # 360° Overview
     with tab4:
         st.subheader("🌐 360° Performance Overview")
         df = get_records()
@@ -164,7 +162,7 @@ if role == "Manager":
         else:
             st.warning("No data yet.")
 
-    # ---------------- Leave Requests ----------------
+    # Leave Requests
     with tab5:
         st.subheader("🏖 Leave Requests")
         df = get_records({"status": "Leave Applied"})
@@ -177,9 +175,9 @@ if role == "Manager":
         else:
             st.info("No pending leave requests.")
 
-# ----------------------------
+# -------------------------------------
 # TEAM MEMBER
-# ----------------------------
+# -------------------------------------
 elif role == "Team Member":
     st.header("👩‍💻 Team Member Portal")
     company = st.text_input("🏢 Company")
@@ -209,9 +207,9 @@ elif role == "Team Member":
         })
         st.success("✅ Leave application submitted.")
 
-# ----------------------------
+# -------------------------------------
 # CLIENT
-# ----------------------------
+# -------------------------------------
 elif role == "Client":
     st.header("🧾 Client Portal")
     company = st.text_input("🏢 Company Name")
@@ -229,37 +227,57 @@ elif role == "Client":
         else:
             st.info("No reviewed projects found.")
 
-# ----------------------------
-# ADMIN DASHBOARD (NEW)
-# ----------------------------
+# -------------------------------------
+# ADMIN DASHBOARD — AI CLUSTERING FIXED
+# -------------------------------------
 elif role == "Admin":
     st.header("🧠 Admin Dashboard — AI 360° Clustering Insights")
+
     df = get_records()
+
     if not df.empty and {"employee", "marks", "completion"} <= set(df.columns):
+        # Convert safely
         df["marks"] = pd.to_numeric(df["marks"], errors="coerce")
         df["completion"] = pd.to_numeric(df["completion"], errors="coerce")
+        df = df.dropna(subset=["marks", "completion"])
 
-        kmeans = KMeans(n_clusters=3, n_init=10, random_state=42)
-        df["cluster"] = kmeans.fit_predict(df[["marks", "completion"]])
+        if len(df) >= 3:
+            kmeans = KMeans(n_clusters=3, n_init=10, random_state=42)
+            df["cluster"] = kmeans.fit_predict(df[["marks", "completion"]])
 
-        labels = {0: "Low Performer", 1: "Average", 2: "Top Performer"}
-        df["Performance Cluster"] = df["cluster"].map(labels)
+            cluster_means = df.groupby("cluster")["marks"].mean().sort_values()
+            cluster_labels = {
+                cluster_means.index[0]: "Low Performer",
+                cluster_means.index[1]: "Average Performer",
+                cluster_means.index[2]: "Top Performer"
+            }
 
-        st.subheader("🏅 Employee Performance Clusters")
-        st.dataframe(df[["employee", "marks", "completion", "Performance Cluster"]])
+            df["Performance Cluster"] = df["cluster"].map(cluster_labels)
 
-        fig = px.scatter(df, x="completion", y="marks", color="Performance Cluster",
-                         hover_data=["employee"], title="AI Clustered Employee Performance")
-        st.plotly_chart(fig, use_container_width=True)
+            st.subheader("🏅 Employee Performance Clusters")
+            st.dataframe(df[["employee", "marks", "completion", "Performance Cluster"]])
 
-        top_employees = df[df["Performance Cluster"] == "Top Performer"][["employee", "marks", "completion"]]
-        st.subheader("🌟 Top Performing Employees")
-        st.dataframe(top_employees)
+            fig = px.scatter(
+                df, x="completion", y="marks", color="Performance Cluster",
+                hover_data=["employee", "department", "team"],
+                title="AI-Based Employee Performance Clustering"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            top_employees = (
+                df[df["Performance Cluster"] == "Top Performer"]
+                .sort_values(by="marks", ascending=False)
+                .head(10)[["employee", "marks", "completion"]]
+            )
+            st.subheader("🌟 Top Performing Employees")
+            st.dataframe(top_employees)
+        else:
+            st.warning("⚠️ Need at least 3 valid records for clustering.")
     else:
-        st.info("Not enough data for clustering. Please add task records first.")
+        st.info("📊 No sufficient data available yet for clustering.")
 
-# ----------------------------
+# -------------------------------------
 # FOOTER
-# ----------------------------
+# -------------------------------------
 st.markdown("---")
-st.caption("✅ Final Enterprise Build — Manager, Team, Client, Admin with KMeans AI insights.")
+st.caption("✅ Final Enterprise Build — All Roles, Clustering, Safe AI Logic, Error-Free.")
