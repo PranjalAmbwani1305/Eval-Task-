@@ -203,14 +203,5 @@ dummy_df_kmeans = pd.DataFrame({
 kmeans = KMeans(n_clusters=3, n_init=10, random_state=42)
 kmeans.fit(dummy_df_kmeans[["completion", "marks"]])
 
-
-
-        "Task stored in Pinecone",
-        "Predict marks & On Track status",
-        "Sentiment + final marks",
-        "Final sentiment summary",
-        "Visual department-level analytics"
-    ]
-})
 st.header("Summary")
 st.markdown("""> Your system uses **AI to automate performance review, feedback sentiment, and risk assessment**, storing insights in Pinecone for real-time, data-driven dashboards — giving it a top-tier, enterprise-level “HR + project intelligence” feel.""")
