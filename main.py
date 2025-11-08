@@ -7,8 +7,7 @@ import pandas as pd
 import uuid
 from datetime import date, datetime, timedelta
 import random
-from pinecone.grpc import PineconeGRPC as Pinecone
-from pinecone import ServerlessSpec
+from pinecone import Pinecone, ServerlessSpec
 import json
 
 # ------------------------------------------------
@@ -29,7 +28,7 @@ def init_pinecone():
         return None, None, 1024
     
     pc = Pinecone(api_key=api_key)
-    index_name = "task"
+    index_name = "workforce-system"
     dimension = 1024  # Match your existing index dimension
     
     # Create index if it doesn't exist
@@ -87,15 +86,41 @@ def get_all_records():
         # List all record IDs using the new pagination method
         data = []
         
-        # Use list_paginated to get all vectors
-        for ids in index.list_paginated():
-            # Fetch vectors by ID
-            fetch_response = index.fetch(ids=ids)
+        # Use list_paginated to get all vectors (new API)
+        try:
+            for ids_batch in index.list_paginated():
+                if ids_batch:
+                    # Fetch vectors by ID
+                    fetch_response = index.fetch(ids=ids_batch)
+                    
+                    for vector_id, vector_data in fetch_response.vectors.items():
+                        record = vector_data.metadata.copy()
+                        record["_id"] = vector_id
+                        data.append(record)
+        except AttributeError:
+            # Fallback for older Pinecone versions - use list() with pagination
+            page_size = 100
+            namespace = ""
+            pagination_token = None
             
-            for vector_id, vector_data in fetch_response.vectors.items():
-                record = vector_data.metadata.copy()
-                record["_id"] = vector_id
-                data.append(record)
+            while True:
+                if pagination_token:
+                    list_result = index.list(namespace=namespace, limit=page_size, pagination_token=pagination_token)
+                else:
+                    list_result = index.list(namespace=namespace, limit=page_size)
+                
+                ids = [v.id for v in list_result.vectors]
+                
+                if ids:
+                    fetch_response = index.fetch(ids=ids)
+                    for vector_id, vector_data in fetch_response.vectors.items():
+                        record = vector_data.metadata.copy()
+                        record["_id"] = vector_id
+                        data.append(record)
+                
+                pagination_token = list_result.pagination.next if list_result.pagination else None
+                if not pagination_token:
+                    break
         
         if not data:
             return pd.DataFrame()
