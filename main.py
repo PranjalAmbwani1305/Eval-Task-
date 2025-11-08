@@ -7,7 +7,8 @@ import pandas as pd
 import uuid
 from datetime import date, datetime, timedelta
 import random
-from pinecone import Pinecone, ServerlessSpec
+from pinecone.grpc import PineconeGRPC as Pinecone
+from pinecone import ServerlessSpec
 import json
 
 # ------------------------------------------------
@@ -25,31 +26,32 @@ def init_pinecone():
     api_key = st.secrets.get("PINECONE_API_KEY", "")
     if not api_key:
         st.error("⚠️ PINECONE_API_KEY not found in secrets!")
-        return None, None
+        return None, None, 1024
     
     pc = Pinecone(api_key=api_key)
     index_name = "task"
+    dimension = 1024  # Match your existing index dimension
     
     # Create index if it doesn't exist
     if index_name not in pc.list_indexes().names():
         pc.create_index(
             name=index_name,
-            dimension=1024,  # Dimension for metadata storage
+            dimension=dimension,
             metric="cosine",
             spec=ServerlessSpec(cloud="aws", region="us-east-1")
         )
     
     index = pc.Index(index_name)
-    return pc, index
+    return pc, index, dimension
 
-pc, index = init_pinecone()
+pc, index, VECTOR_DIMENSION = init_pinecone()
 
 # ------------------------------------------------
 # HELPER FUNCTIONS
 # ------------------------------------------------
 def create_dummy_vector():
     """Create a dummy vector for storage (we're using Pinecone as key-value store)"""
-    return [0.0] * 384
+    return [0.0] * VECTOR_DIMENSION
 
 def save_record(record):
     """Save a record to Pinecone"""
@@ -82,22 +84,21 @@ def get_all_records():
         return pd.DataFrame()
     
     try:
-        # Query to get all records (using a dummy vector)
-        results = index.query(
-            vector=create_dummy_vector(),
-            top_k=10000,
-            include_metadata=True
-        )
-        
-        if not results.matches:
-            return pd.DataFrame()
-        
-        # Convert to DataFrame
+        # List all record IDs using the new pagination method
         data = []
-        for match in results.matches:
-            record = match.metadata.copy()
-            record["_id"] = match.id
-            data.append(record)
+        
+        # Use list_paginated to get all vectors
+        for ids in index.list_paginated():
+            # Fetch vectors by ID
+            fetch_response = index.fetch(ids=ids)
+            
+            for vector_id, vector_data in fetch_response.vectors.items():
+                record = vector_data.metadata.copy()
+                record["_id"] = vector_id
+                data.append(record)
+        
+        if not data:
+            return pd.DataFrame()
         
         df = pd.DataFrame(data)
         
