@@ -1,5 +1,5 @@
 # ============================================================
-# 🏢 AI Enterprise Workforce Management System — Professional Simple Edition
+# 🏢 AI Enterprise Workforce Management System — Pinecone Edition
 # ============================================================
 
 import streamlit as st
@@ -7,45 +7,133 @@ import pandas as pd
 import uuid
 from datetime import date, datetime, timedelta
 import random
+from pinecone import Pinecone, ServerlessSpec
+import json
 
 # ------------------------------------------------
 # PAGE CONFIG
 # ------------------------------------------------
 st.set_page_config(page_title="AI Workforce System", layout="wide")
-st.title("🏢 AI Enterprise Workforce — Final Professional Edition")
+st.title("🏢 AI Enterprise Workforce — Pinecone Edition")
 
 # ------------------------------------------------
-# SESSION STORAGE
+# PINECONE SETUP
 # ------------------------------------------------
-if "records" not in st.session_state:
-    st.session_state.records = pd.DataFrame()
+@st.cache_resource
+def init_pinecone():
+    """Initialize Pinecone connection"""
+    api_key = st.secrets.get("PINECONE_API_KEY", "")
+    if not api_key:
+        st.error("⚠️ PINECONE_API_KEY not found in secrets!")
+        return None, None
+    
+    pc = Pinecone(api_key=api_key)
+    index_name = "task"
+    
+    # Create index if it doesn't exist
+    if index_name not in pc.list_indexes().names():
+        pc.create_index(
+            name=index_name,
+            dimension=1024,  # Dimension for metadata storage
+            metric="cosine",
+            spec=ServerlessSpec(cloud="aws", region="us-east-1")
+        )
+    
+    index = pc.Index(index_name)
+    return pc, index
+
+pc, index = init_pinecone()
 
 # ------------------------------------------------
 # HELPER FUNCTIONS
 # ------------------------------------------------
-def get_df():
-    return st.session_state.records.copy()
+def create_dummy_vector():
+    """Create a dummy vector for storage (we're using Pinecone as key-value store)"""
+    return [0.0] * 384
 
-def upsert_record(record):
-    df = get_df()
+def save_record(record):
+    """Save a record to Pinecone"""
+    if not index:
+        st.error("Pinecone not initialized!")
+        return False
+    
     if "_id" not in record:
         record["_id"] = str(uuid.uuid4())
-    # FIXED: Check if record exists correctly
-    if not df.empty and "_id" in df.columns and record["_id"] in df["_id"].values:
-        df.loc[df["_id"] == record["_id"], list(record.keys())] = list(record.values())
-    else:
-        df = pd.concat([df, pd.DataFrame([record])], ignore_index=True)
-    st.session_state.records = df
+    
+    try:
+        # Convert all values to strings for metadata
+        metadata = {k: str(v) for k, v in record.items()}
+        
+        index.upsert(
+            vectors=[{
+                "id": record["_id"],
+                "values": create_dummy_vector(),
+                "metadata": metadata
+            }]
+        )
+        return True
+    except Exception as e:
+        st.error(f"Error saving to Pinecone: {e}")
+        return False
+
+def get_all_records():
+    """Fetch all records from Pinecone"""
+    if not index:
+        return pd.DataFrame()
+    
+    try:
+        # Query to get all records (using a dummy vector)
+        results = index.query(
+            vector=create_dummy_vector(),
+            top_k=10000,
+            include_metadata=True
+        )
+        
+        if not results.matches:
+            return pd.DataFrame()
+        
+        # Convert to DataFrame
+        data = []
+        for match in results.matches:
+            record = match.metadata.copy()
+            record["_id"] = match.id
+            data.append(record)
+        
+        df = pd.DataFrame(data)
+        
+        # Convert numeric columns
+        if "completion" in df.columns:
+            df["completion"] = pd.to_numeric(df["completion"], errors="coerce")
+        
+        # Convert boolean columns
+        if "reviewed" in df.columns:
+            df["reviewed"] = df["reviewed"].map({"True": True, "False": False, "true": True, "false": False})
+        
+        return df
+    except Exception as e:
+        st.error(f"Error fetching from Pinecone: {e}")
+        return pd.DataFrame()
+
+def delete_record(record_id):
+    """Delete a record from Pinecone"""
+    if not index:
+        return False
+    try:
+        index.delete(ids=[record_id])
+        return True
+    except Exception as e:
+        st.error(f"Error deleting from Pinecone: {e}")
+        return False
 
 def seed_data():
     """Add sample data"""
     employees = ["Aarav", "Isha", "Rohan", "Amruta"]
     companies = ["TechNova", "InnoSoft"]
-    data = []
+    
     for i in range(6):
         completion = random.choice([10, 40, 70, 90])
         status = "✅ On Track" if completion >= 60 else "🕐 Pending"
-        data.append({
+        record = {
             "_id": str(uuid.uuid4()),
             "record_type": "task",
             "company": random.choice(companies),
@@ -54,8 +142,11 @@ def seed_data():
             "completion": completion,
             "status": status,
             "reviewed": False
-        })
-    data.append({
+        }
+        save_record(record)
+    
+    # Add a sample meeting
+    record = {
         "_id": str(uuid.uuid4()),
         "record_type": "meeting",
         "meeting_title": "Weekly Sync",
@@ -63,11 +154,14 @@ def seed_data():
         "participants": ", ".join(random.sample(employees, 3)),
         "meeting_datetime": str(datetime.now() + timedelta(days=1)),
         "agenda": "Project progress discussion"
-    })
-    st.session_state.records = pd.DataFrame(data)
-    st.success("✅ Sample data added successfully!")
+    }
+    save_record(record)
+    
+    st.success("✅ Sample data added to Pinecone successfully!")
+    st.rerun()
 
 def filter_type(df, rtype):
+    """Filter dataframe by record type"""
     if df.empty or "record_type" not in df.columns:
         return pd.DataFrame()
     df["record_type"] = df["record_type"].fillna("").astype(str).str.lower()
@@ -78,10 +172,15 @@ def filter_type(df, rtype):
 # ------------------------------------------------
 st.sidebar.header("🎚 Select Role")
 role = st.sidebar.radio("Choose Role", ["Manager", "Team Member", "Client", "Admin"])
+
 if st.sidebar.button("⚙️ Add Sample Data"):
     seed_data()
 
-df = get_df()
+if st.sidebar.button("🔄 Refresh Data"):
+    st.rerun()
+
+# Load data from Pinecone
+df = get_all_records()
 
 # ------------------------------------------------
 # STYLE HELPERS
@@ -129,8 +228,9 @@ if role == "Manager":
                 "reviewed": False,
                 "assigned_on": str(datetime.now())
             }
-            upsert_record(record)
-            st.success(f"Task '{task}' assigned to {employee}")
+            if save_record(record):
+                st.success(f"Task '{task}' assigned to {employee}")
+                st.rerun()
 
     # --- Review Tasks ---
     with tabs[1]:
@@ -145,14 +245,20 @@ if role == "Manager":
             else:
                 for i, r in pending.iterrows():
                     st.write(f"🧠 {r['task']} — {r['employee']}")
-                    completion = st.slider(f"Update Completion ({r['employee']})", 0, 100, int(r['completion']), key=f"rev_{i}")
+                    completion = st.slider(
+                        f"Update Completion ({r['employee']})", 
+                        0, 100, 
+                        int(r['completion']), 
+                        key=f"rev_{i}"
+                    )
                     if st.button(f"✅ Approve {r['task']}", key=f"ap_{i}"):
-                        r["completion"] = completion
-                        r["status"] = "✅ Completed" if completion == 100 else "✅ On Track"
-                        r["reviewed"] = True
-                        upsert_record(r.to_dict())
-                        st.success(f"Approved {r['task']}")
-                        st.rerun()  # FIXED: Updated from experimental_rerun()
+                        record = r.to_dict()
+                        record["completion"] = completion
+                        record["status"] = "✅ Completed" if completion == 100 else "✅ On Track"
+                        record["reviewed"] = True
+                        if save_record(record):
+                            st.success(f"Approved {r['task']}")
+                            st.rerun()
 
     # --- Meetings ---
     with tabs[2]:
@@ -173,8 +279,9 @@ if role == "Manager":
                 "meeting_datetime": str(dt),
                 "agenda": agenda
             }
-            upsert_record(record)
-            st.success("Meeting Scheduled Successfully!")
+            if save_record(record):
+                st.success("Meeting Scheduled Successfully!")
+                st.rerun()
 
     # --- Overview ---
     with tabs[3]:
@@ -184,7 +291,6 @@ if role == "Manager":
         summary_card("Completed", len(tasks[tasks["status"].str.contains('Completed', na=False)]), "✅")
         if not tasks.empty:
             st.subheader("📊 All Tasks Overview")
-            # FIXED: Using map() instead of deprecated applymap()
             st.dataframe(tasks[["company", "employee", "task", "completion", "status"]]
                          .style.map(color_status, subset=["status"]))
 
@@ -209,7 +315,6 @@ elif role == "Team Member":
                 st.warning("No tasks assigned to you yet.")
             else:
                 summary_card("Total Tasks", len(my_tasks), "🧾")
-                # FIXED: Using map() instead of deprecated applymap()
                 st.dataframe(my_tasks[["task", "completion", "status"]]
                              .style.map(color_status, subset=["status"]))
 
@@ -230,8 +335,9 @@ elif role == "Team Member":
                 "reviewed": False,
                 "updated_on": str(datetime.now())
             }
-            upsert_record(record)
-            st.success("Progress updated successfully!")
+            if save_record(record):
+                st.success("Progress updated successfully!")
+                st.rerun()
 
     # --- My Meetings ---
     with tabs[2]:
@@ -255,9 +361,11 @@ elif role == "Client":
         for i, r in reviewed.iterrows():
             st.write(f"🧾 {r['task']} — {r['employee']}")
             if st.button(f"Approve {r['task']}", key=f"cl_{i}"):
-                r["status"] = "✅ Client Approved"
-                upsert_record(r.to_dict())
-                st.success(f"Approved {r['task']}")
+                record = r.to_dict()
+                record["status"] = "✅ Client Approved"
+                if save_record(record):
+                    st.success(f"Approved {r['task']}")
+                    st.rerun()
 
 # ============================================================
 # 🧠 ADMIN
@@ -270,10 +378,19 @@ elif role == "Admin":
     summary_card("Total Tasks", len(tasks), "🧾")
     summary_card("Meetings", len(meets), "📅")
     if not df.empty:
+        st.subheader("📊 All Records")
         st.dataframe(df)
+        
+        # Add delete functionality for admin
+        st.subheader("🗑️ Delete Records")
+        record_to_delete = st.selectbox("Select record to delete", df["_id"].tolist() if "_id" in df.columns else [])
+        if st.button("Delete Selected Record"):
+            if delete_record(record_to_delete):
+                st.success("Record deleted successfully!")
+                st.rerun()
 
 # ------------------------------------------------
 # FOOTER
 # ------------------------------------------------
 st.markdown("---")
-st.caption("🚀 Professional Submission Edition — Local Only | Error-Free | No Pinecone")
+st.caption("🚀 Pinecone Edition — Cloud Persistent Storage | Fully Functional")
