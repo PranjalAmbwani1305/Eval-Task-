@@ -1,3 +1,4 @@
+# Use command streamlit run app.py
 import streamlit as st
 from pinecone import Pinecone, ServerlessSpec
 import numpy as np
@@ -11,9 +12,9 @@ import matplotlib.pyplot as plt
 import io, csv
 from datetime import datetime, timedelta
 
-# ==========================================================
-# STEP 1 — Initialize Pinecone
-# ==========================================================
+# ------------------------------
+# Step 1: Initialize Pinecone DB
+# ------------------------------
 pc = Pinecone(api_key=st.secrets["PINECONE_API_KEY"])
 index_name = "task"
 dimension = 1024
@@ -28,9 +29,9 @@ if index_name not in [idx["name"] for idx in pc.list_indexes()]:
 
 index = pc.Index(index_name)
 
-# ==========================================================
-# STEP 2 — ML MODELS
-# ==========================================================
+# ------------------------------
+# Step 2: ML Models
+# ------------------------------
 lin_reg = LinearRegression()
 lin_reg.fit([[0], [100]], [0, 5])
 
@@ -43,9 +44,9 @@ y_train = [1, 1, 0, 0]
 svm_clf = SVC()
 svm_clf.fit(X_train, y_train)
 
-# ==========================================================
-# STEP 3 — Helper Functions
-# ==========================================================
+# ------------------------------
+# Step 3: Helper Functions
+# ------------------------------
 def random_vector(dim=dimension):
     return np.random.rand(dim).tolist()
 
@@ -96,16 +97,16 @@ def classify_performance(tasks):
             classification[emp] = "Low"
     return classification
 
-# ==========================================================
-# STEP 4 — Streamlit App
-# ==========================================================
-st.title("🤖 EvalTrack — AI-Powered Task Management & Review")
+# ------------------------------
+# Step 4: Streamlit App
+# ------------------------------
+st.title("📊 AI-Powered Task Completion & Review")
 
 role = st.sidebar.selectbox("Login as", ["Team Member", "Manager", "Client"])
 
-# ==========================================================
-# TEAM MEMBER
-# ==========================================================
+# ------------------------------
+# Team Member Section
+# ------------------------------
 if role == "Team Member":
     st.header("👩‍💻 Team Member Section")
     company = st.text_input("🏢 Company Name")
@@ -131,8 +132,7 @@ if role == "Team Member":
                         "completion": float(completion),
                         "marks": float(marks),
                         "status": status_text,
-                        "reviewed": False,
-                        "created_at": datetime.now().isoformat()
+                        "reviewed": False
                     })
                 }]
             )
@@ -140,9 +140,9 @@ if role == "Team Member":
         else:
             st.error("❌ Fill all fields before submitting")
 
-# ==========================================================
-# CLIENT
-# ==========================================================
+# ------------------------------
+# Client Section
+# ------------------------------
 elif role == "Client":
     st.header("👨‍💼 Client Section")
     company = st.text_input("🏢 Company Name")
@@ -159,20 +159,19 @@ elif role == "Client":
                 md = match.metadata or {}
                 st.write(
                     f"👤 {md.get('employee','?')} | **{md.get('task','?')}** → {md.get('completion',0)}% "
-                    f"(Marks: {md.get('marks',0):.2f}) | Status: {md.get('status','?')}"
+                    f"(Marks: {md.get('marks',0):.2f}) | Status: {md.get('status','?')} | Sentiment: {md.get('sentiment','N/A')}"
                 )
-                st.write(f"📝 Manager Sentiment: {md.get('sentiment','N/A')}")
         else:
             st.warning("⚠️ No approved tasks found.")
     elif not company:
         st.error("❌ Enter company name")
 
-# ==========================================================
-# MANAGER
-# ==========================================================
+# ------------------------------
+# Manager Section
+# ------------------------------
 elif role == "Manager":
     st.header("🧑‍💼 Manager Review Section")
-    all_res = index.query(vector=random_vector(), top_k=200, include_metadata=True)
+    all_res = index.query(vector=random_vector(), top_k=100, include_metadata=True)
     companies = list(set([m.metadata.get("company","?") for m in all_res.matches])) if all_res.matches else []
 
     if companies:
@@ -267,129 +266,87 @@ elif role == "Manager":
             st.success(f"✅ All tasks for {company} have already been reviewed!")
 
 # ==========================================================
-# STEP 5 — Advanced Tabs (Dashboard, Alerts, Analytics, etc.)
+# Extra Tabs — Dashboard, Alerts, Analytics, Export, Search, Skill
 # ==========================================================
 st.markdown("---")
 st.header("✨ Extended EvalTrack Features")
 
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "📈 Dashboard", "🔔 Alerts", "📊 Analytics",
-    "📁 Export", "🔎 Search & Approve", "🧭 Skill Suggestions"
+    "📈 Dashboard",
+    "🔔 Alerts",
+    "📊 Analytics",
+    "📁 Export",
+    "🔎 Search & Approve",
+    "🧭 Skill Suggestions"
 ])
 
-# ---------- TAB 1: Dashboard ----------
+# ---------- TAB 1 ----------
 with tab1:
-    st.subheader("Project Dashboard Overview")
     try:
         qres = index.query(vector=random_vector(), top_k=1000, include_metadata=True)
         matches = qres.matches or []
-    except Exception as e:
-        st.error(f"Error querying Pinecone: {e}")
+    except:
         matches = []
 
-    df_rows = []
-    for m in matches:
-        md = m.metadata or {}
-        df_rows.append({
-            "id": m.id,
-            "company": md.get("company"),
-            "employee": md.get("employee"),
-            "task": md.get("task"),
-            "completion": float(md.get("completion", 0)),
-            "marks": float(md.get("marks", 0)),
-            "status": md.get("status"),
-            "reviewed": md.get("reviewed", False),
-            "cluster": md.get("cluster", None),
-            "sentiment": md.get("sentiment", None)
-        })
-    df = pd.DataFrame(df_rows)
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("🔢 Total Tasks", len(df))
-    c2.metric("✅ Reviewed", int(df['reviewed'].sum()) if not df.empty else 0)
-    c3.metric("👥 Employees", int(df['employee'].nunique()) if not df.empty else 0)
-    c4.metric("🏢 Companies", int(df['company'].nunique()) if not df.empty else 0)
-
+    df = pd.DataFrame([m.metadata for m in matches if m.metadata])
+    st.metric("Total Tasks", len(df))
     if not df.empty:
-        st.markdown("**Top Performers**")
-        top_perf = df.groupby("employee")["marks"].mean().sort_values(ascending=False).head(10)
-        st.table(top_perf.reset_index())
-        fig, ax = plt.subplots()
-        ax.hist(df["completion"].fillna(0), bins=10)
-        ax.set_xlabel("Completion %")
-        ax.set_ylabel("Count")
-        st.pyplot(fig)
+        st.bar_chart(df["completion"])
+    else:
+        st.info("No data yet.")
 
-# ---------- TAB 2: Alerts ----------
+# ---------- TAB 2 ----------
 with tab2:
     st.subheader("AI Alerts")
-    thresh = st.slider("Alert if completion below (%)", 0, 100, 40)
-    overdue_days = st.number_input("Overdue days (unreviewed)", 0, 90, 7)
-    alerts = []
-    for m in matches:
-        md = m.metadata or {}
-        comp = float(md.get("completion", 0))
-        if comp < thresh:
-            alerts.append(f"{md.get('employee')} | {md.get('task')} ({comp}%) - Low Completion")
-    st.write(f"Found {len(alerts)} alerts")
+    threshold = st.slider("Alert if completion below (%)", 0, 100, 40)
+    alerts = [m.metadata for m in matches if m.metadata and float(m.metadata.get("completion", 0)) < threshold]
+    st.write(f"Found {len(alerts)} low-completion tasks")
     for a in alerts:
-        st.warning(a)
+        st.warning(f"{a.get('employee')} — {a.get('task')} ({a.get('completion')}%)")
 
-# ---------- TAB 3: Analytics ----------
+# ---------- TAB 3 ----------
 with tab3:
-    st.subheader("Analytics & Trends")
     if not df.empty:
-        if "cluster" in df.columns and df["cluster"].notnull().any():
-            cluster_counts = df["cluster"].fillna(-1).astype(int).value_counts()
-            st.bar_chart(cluster_counts)
-        sent_counts = df["sentiment"].fillna("N/A").value_counts()
-        st.table(sent_counts)
+        st.write("Sentiment Counts:")
+        st.table(df["sentiment"].fillna("N/A").value_counts())
+    else:
+        st.info("No records available.")
 
-# ---------- TAB 4: Export ----------
+# ---------- TAB 4 ----------
 with tab4:
     if not df.empty:
-        csv_bytes = df.to_csv(index=False).encode()
-        st.download_button("⬇️ Export CSV", csv_bytes, "tasks_export.csv", "text/csv")
+        csv_data = df.to_csv(index=False).encode()
+        st.download_button("⬇️ Export CSV", csv_data, "tasks_export.csv", "text/csv")
+    else:
+        st.info("No data to export.")
 
-# ---------- TAB 5: Search & Approve ----------
+# ---------- TAB 5 ----------
 with tab5:
-    st.subheader("Search & Approve Tasks")
-    q_company = st.text_input("Company Filter")
-    filter_dict = {}
-    if q_company:
-        filter_dict["company"] = {"$eq": q_company}
-    res = index.query(vector=random_vector(), top_k=200, include_metadata=True, filter=filter_dict or None)
+    q_company = st.text_input("Filter by Company")
+    filters = {"company": {"$eq": q_company}} if q_company else None
+    res = index.query(vector=random_vector(), top_k=200, include_metadata=True, filter=filters)
     for m in res.matches:
         md = m.metadata or {}
-        cols = st.columns([3, 1, 1])
-        cols[0].write(f"{md.get('task')} ({md.get('employee')})")
+        cols = st.columns([3,1,1])
+        cols[0].write(f"{md.get('task')} — {md.get('employee')}")
         cols[1].write(f"{md.get('completion')}%")
-        if cols[2].button("Approve", key=f"a{m.id[:6]}"):
+        if cols[2].button("Approve", key=m.id[:6]):
             md["reviewed"] = True
-            index.upsert([{"id": m.id, "values": m.values if hasattr(m, "values") else random_vector(), "metadata": safe_metadata(md)}])
+            index.upsert([{"id": m.id, "values": m.values, "metadata": safe_metadata(md)}])
             st.success(f"Approved {md.get('task')}")
 
-# ---------- TAB 6: Skill Suggestions ----------
+# ---------- TAB 6 ----------
 with tab6:
-    st.subheader("Employee Skill Suggestions")
-    sugg_emp = st.text_input("Employee name")
+    emp = st.text_input("Employee Name")
     if st.button("Suggest"):
-        emp_rows = df[df["employee"] == sugg_emp]
-        if emp_rows.empty:
-            st.info("No records found.")
-        else:
-            avg_marks = emp_rows["marks"].mean()
-            avg_comp = emp_rows["completion"].mean()
-            st.write(f"Average Marks: {avg_marks:.2f}, Completion: {avg_comp:.1f}%")
-            sugg = []
+        if not df.empty and emp in df["employee"].values:
+            avg_marks = df[df["employee"] == emp]["marks"].mean()
+            st.write(f"Average Marks: {avg_marks:.2f}")
             if avg_marks < 2.5:
-                sugg += ["Core skill training", "1:1 Mentorship"]
+                st.write("➡️ Suggest: Core training & mentorship")
             elif avg_marks < 4:
-                sugg += ["Short upskilling course"]
+                st.write("➡️ Suggest: Skill enhancement course")
             else:
-                sugg += ["Leadership Program"]
-            if avg_comp < 60:
-                sugg += ["Time management session"]
-            st.write("Suggestions:")
-            for s in sugg:
-                st.write("-", s)
+                st.write("➡️ Suggest: Leadership program")
+        else:
+            st.info("Employee not found.")
