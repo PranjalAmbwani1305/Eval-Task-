@@ -263,4 +263,4 @@ elif role == "Manager":
                         }])
                     st.success("✅ All reviews saved successfully!")
         else:
-            st.success(f"✅ All tasks for {company} have already been reviewed!"
+            st.success(f"✅ All tasks for {company} have already been reviewed!")
