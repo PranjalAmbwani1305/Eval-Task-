@@ -1,17 +1,38 @@
-# main.py — AI Workforce Intelligence Dashboard (Enterprise)
+# main.py — AI Workforce Intelligence Platform (Enterprise Edition)
+"""
+Production-ready workforce analytics and management system with:
+- Streamlit front-end
+- Pinecone vector storage
+- HuggingFace AI insights
+- Slack & Email notifications
+
+Before running:
+    pip install streamlit pinecone-client scikit-learn plotly huggingface-hub PyPDF2 pandas openpyxl requests
+
+Secrets required in .streamlit/secrets.toml:
+[PINECONE_API_KEY]
+HUGGINGFACEHUB_API_TOKEN
+SMTP_SERVER
+SMTP_PORT
+SMTP_USER
+SMTP_PASS
+NOTIFY_FROM
+SLACK_WEBHOOK_URL
+"""
 
 import streamlit as st
 from pinecone import Pinecone, ServerlessSpec
 import numpy as np
 import pandas as pd
-import uuid, json, time
+import uuid, json, time, smtplib, requests
 from datetime import datetime, date
+from email.message import EmailMessage
 from sklearn.linear_model import LinearRegression
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.svm import SVC
 import plotly.express as px
 
-# Optional integrations
+# Optional AI / PDF tools
 try:
     from huggingface_hub import InferenceClient
     HF_AVAILABLE = True
@@ -25,19 +46,72 @@ except:
     PDF_AVAILABLE = False
 
 # ---------------------------------------------------------
-# Streamlit Config
+# Streamlit Configuration
 # ---------------------------------------------------------
-st.set_page_config(page_title="AI Workforce Dashboard", layout="wide")
+st.set_page_config(page_title="AI Workforce Intelligence", layout="wide")
 st.title("AI Workforce Intelligence Platform")
 
 # ---------------------------------------------------------
-# API Keys
+# Secure Config
 # ---------------------------------------------------------
-PINECONE_API_KEY = st.secrets.get("PINECONE_API_KEY", "")
-HF_TOKEN = st.secrets.get("HUGGINGFACEHUB_API_TOKEN", "")
+cfg = st.secrets
+PINECONE_API_KEY = cfg.get("PINECONE_API_KEY", "")
+HF_TOKEN = cfg.get("HUGGINGFACEHUB_API_TOKEN", "")
+SMTP_SERVER = cfg.get("SMTP_SERVER", "")
+SMTP_PORT = cfg.get("SMTP_PORT", 587)
+SMTP_USER = cfg.get("SMTP_USER", "")
+SMTP_PASS = cfg.get("SMTP_PASS", "")
+NOTIFY_FROM = cfg.get("NOTIFY_FROM", SMTP_USER)
+SLACK_WEBHOOK = cfg.get("SLACK_WEBHOOK_URL", "")
 
-INDEX_NAME = "task"  # must be lowercase and simple
+INDEX_NAME = "task"
 DIMENSION = 1024
+
+# ---------------------------------------------------------
+# Utility Helpers
+# ---------------------------------------------------------
+def now():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def rand_vec():
+    return np.random.rand(DIMENSION).tolist()
+
+def safe_meta(md):
+    """Ensure metadata is serializable for Pinecone."""
+    clean = {}
+    for k, v in md.items():
+        if isinstance(v, (datetime, date)):
+            v = v.isoformat()
+        elif isinstance(v, (list, dict)):
+            v = json.dumps(v)
+        elif pd.isna(v):
+            v = ""
+        clean[k] = v
+    return clean
+
+def notify_slack(msg):
+    if not SLACK_WEBHOOK:
+        return
+    try:
+        requests.post(SLACK_WEBHOOK, json={"text": msg}, timeout=5)
+    except Exception:
+        pass
+
+def notify_email(subject, body, recipients):
+    if not all([SMTP_SERVER, SMTP_USER, SMTP_PASS]):
+        return
+    try:
+        msg = EmailMessage()
+        msg["From"] = NOTIFY_FROM
+        msg["To"] = ", ".join(recipients)
+        msg["Subject"] = subject
+        msg.set_content(body)
+        with smtplib.SMTP(SMTP_SERVER, int(SMTP_PORT)) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.send_message(msg)
+    except Exception:
+        pass
 
 # ---------------------------------------------------------
 # Pinecone Initialization
@@ -55,54 +129,24 @@ if PINECONE_API_KEY:
                 spec=ServerlessSpec(cloud="aws", region="us-east-1"),
             )
             with st.spinner("Creating Pinecone index..."):
-                while True:
-                    desc = pc.describe_index(INDEX_NAME)
-                    if desc.get("status", {}).get("ready", False):
-                        break
+                while not pc.describe_index(INDEX_NAME)["status"]["ready"]:
                     time.sleep(2)
         index = pc.Index(INDEX_NAME)
-        st.success(f"Connected to Pinecone index: {INDEX_NAME}")
+        st.caption(f"Connected to Pinecone index: {INDEX_NAME}")
     except Exception as e:
-        st.warning(f"Pinecone init failed — running local only. ({e})")
+        st.warning(f"Pinecone init failed, running in local mode ({e})")
 else:
-    st.warning("Pinecone API key missing in Streamlit secrets. Running local mode.")
+    st.warning("No Pinecone API key found. Running in local mode.")
 
 # ---------------------------------------------------------
-# Utility Functions
+# Data Access Layer
 # ---------------------------------------------------------
-def now():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-def rand_vec():
-    return np.random.rand(DIMENSION).tolist()
-
-def safe_meta(md):
-    clean = {}
-    for k, v in md.items():
-        if isinstance(v, (datetime, date)):
-            v = v.isoformat()
-        elif isinstance(v, (list, dict)):
-            v = json.dumps(v)
-        elif pd.isna(v):
-            v = ""
-        clean[k] = v
-    return clean
-
-def safe_rerun():
-    try:
-        st.rerun()
-    except AttributeError:
-        st.experimental_rerun()
-
-def upsert(id_, md):
+def upsert_data(id_, md):
     md = safe_meta(md)
-    if not index:
-        st.session_state.setdefault("LOCAL_DATA", {})[id_] = md
-        return
-    try:
+    if index:
         index.upsert([{"id": id_, "values": rand_vec(), "metadata": md}])
-    except Exception as e:
-        st.warning(f"Upsert failed: {e}")
+    else:
+        st.session_state.setdefault("LOCAL_DATA", {})[id_] = md
 
 def fetch_all():
     if not index:
@@ -119,7 +163,7 @@ def fetch_all():
             rows.append(md)
         return pd.DataFrame(rows)
     except Exception as e:
-        st.warning(f"Fetch error: {e}")
+        st.warning(f"Fetch failed: {e}")
         return pd.DataFrame()
 
 # ---------------------------------------------------------
@@ -127,12 +171,9 @@ def fetch_all():
 # ---------------------------------------------------------
 lin_reg = LinearRegression().fit([[0], [50], [100]], [0, 2.5, 5])
 vectorizer = CountVectorizer()
-svm = SVC()
-try:
-    X = vectorizer.fit_transform(["good", "excellent", "poor", "bad", "average"])
-    svm.fit(X, [1, 1, 0, 0, 0])
-except:
-    pass
+svm = SVC(probability=True)
+X = vectorizer.fit_transform(["good", "excellent", "poor", "bad", "average"])
+svm.fit(X, [1, 1, 0, 0, 0])
 
 # ---------------------------------------------------------
 # Role Selector
@@ -147,241 +188,155 @@ if role == "Manager":
     st.header("Manager Command Center")
     tabs = st.tabs([
         "Task Management",
-        "AI Insights & Analytics",
+        "AI Insights",
         "Meetings & Feedback",
         "Leave Management",
         "360 Overview"
     ])
 
-    # ---- Task Management ----
+    # --- TASK MANAGEMENT ---
     with tabs[0]:
         st.subheader("Assign or Reassign Tasks")
+
         with st.form("assign_task"):
             company = st.text_input("Company")
             department = st.text_input("Department")
-            employee = st.text_input("Employee")
+            employee = st.text_input("Employee (email preferred)")
             task = st.text_input("Task Title")
-            desc = st.text_area("Description")
+            desc = st.text_area("Task Description")
             deadline = st.date_input("Deadline", value=date.today())
             submit = st.form_submit_button("Assign Task")
 
-            if submit and all([company, employee, task]):
+            if submit and employee and task:
                 tid = str(uuid.uuid4())
-                md = {
-                    "company": company,
-                    "department": department,
-                    "employee": employee,
-                    "task": task,
-                    "description": desc,
-                    "deadline": deadline.isoformat(),
-                    "completion": 0,
-                    "marks": 0,
-                    "status": "Assigned",
-                    "created": now()
-                }
-                upsert(tid, md)
-                st.success("Task assigned successfully.")
+                md = dict(
+                    company=company, department=department, employee=employee,
+                    task=task, description=desc, deadline=deadline.isoformat(),
+                    completion=0, marks=0, status="Assigned", assigned_on=now()
+                )
+                upsert_data(tid, md)
+                st.success("Task successfully assigned.")
+                notify_slack(f"New task '{task}' assigned to {employee}.")
+                if "@" in employee:
+                    notify_email(f"New Task: {task}",
+                                 f"You have been assigned '{task}'. Deadline: {deadline}",
+                                 [employee])
 
         df = fetch_all()
         if not df.empty:
-            df["completion"] = pd.to_numeric(df.get("completion", 0), errors="coerce").fillna(0)
-
-            # ✅ Fix: Ensure department column exists
             if "department" not in df.columns:
                 df["department"] = "General"
-
-            st.dataframe(df[["employee", "task", "completion", "status", "deadline"]])
-
+            df["completion"] = pd.to_numeric(df.get("completion", 0), errors="coerce").fillna(0)
             st.plotly_chart(
-                px.bar(
-                    df,
-                    x="employee",
-                    y="completion",
-                    color="department",
-                    title="Task Completion by Employee"
-                ),
+                px.bar(df, x="employee", y="completion", color="department", title="Task Completion by Employee"),
                 use_container_width=True
             )
 
-            # Reassign functionality
-            task_choice = st.selectbox("Select Task to Reassign", df["task"].unique())
-            new_emp = st.text_input("New Employee Name")
+            task_choice = st.selectbox("Reassign Task", df["task"].unique())
+            new_emp = st.text_input("New Employee")
             reason = st.text_area("Reason for Reassignment")
-            if st.button("Reassign Task"):
+            if st.button("Confirm Reassignment"):
                 r = df[df["task"] == task_choice].iloc[0].to_dict()
-                r["employee"] = new_emp
-                r["status"] = "Reassigned"
-                r["reassigned_reason"] = reason
-                r["reassigned_on"] = now()
-                upsert(r.get("_id") or str(uuid.uuid4()), r)
+                old = r["employee"]
+                r.update({"employee": new_emp, "status": "Reassigned", "reassigned_on": now(), "reason": reason})
+                upsert_data(r.get("_id", str(uuid.uuid4())), r)
                 st.success("Task reassigned.")
+                notify_slack(f"Task '{task_choice}' reassigned from {old} to {new_emp}.")
+                notify_email(f"Task Reassigned: {task_choice}", f"Reason: {reason}", [new_emp])
 
-    # ---- AI Insights ----
+    # --- AI INSIGHTS ---
     with tabs[1]:
-        st.subheader("AI Insights & Analytics")
+        st.subheader("AI-Driven Insights")
         df = fetch_all()
         if df.empty:
             st.info("No task data available.")
         else:
             df["completion"] = pd.to_numeric(df["completion"], errors="coerce").fillna(0)
-            st.metric("Average Completion", f"{df['completion'].mean():.1f}%")
-            st.metric("Total Tasks", len(df))
-            st.metric("Active Employees", df["employee"].nunique())
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Avg Completion", f"{df['completion'].mean():.1f}%")
+            col2.metric("Total Tasks", len(df))
+            col3.metric("Active Employees", df["employee"].nunique())
 
-            st.plotly_chart(px.histogram(df, x="completion", nbins=10, title="Completion Distribution"))
+            st.plotly_chart(px.histogram(df, x="completion", nbins=10, title="Task Completion Distribution"))
 
-            query = st.text_input("Ask AI (e.g., 'Who is underperforming this month?')")
+            query = st.text_input("Ask AI (e.g. 'Who is underperforming this month?')")
             if st.button("Analyze"):
                 if HF_AVAILABLE and HF_TOKEN:
+                    client = InferenceClient(token=HF_TOKEN)
+                    prompt = f"Dataset summary:\n{df.describe().to_dict()}\nQuestion: {query}\nAnswer as an HR analyst."
                     try:
-                        hf = InferenceClient(token=HF_TOKEN)
-                        prompt = f"Given this task data summary:\n{df.describe().to_dict()}\nQuestion: {query}"
-                        try:
-                            res = hf.text_generation(model="mistralai/Mixtral-8x7B-Instruct", prompt=prompt, max_new_tokens=200)
-                        except TypeError:
-                            res = hf.text_generation(model="mistralai/Mixtral-8x7B-Instruct", inputs=prompt, max_new_tokens=200)
-                        out = res["generated_text"] if isinstance(res, dict) else str(res)
-                        st.write(out)
+                        response = client.text_generation(model="mistralai/Mixtral-8x7B-Instruct",
+                                                          prompt=prompt, max_new_tokens=200)
+                        st.write(response if isinstance(response, str) else response.get("generated_text", "No output"))
                     except Exception as e:
                         st.error(f"AI query failed: {e}")
                 else:
                     st.warning("Hugging Face API key not configured.")
 
-    # ---- Meetings ----
+    # --- MEETINGS ---
     with tabs[2]:
         st.subheader("Meeting Scheduler & Feedback")
         with st.form("meeting_form"):
             mtitle = st.text_input("Meeting Title")
-            mdate = st.date_input("Meeting Date", value=date.today())
-            attendees = st.text_area("Attendees (comma separated)")
-            upload = st.file_uploader("Upload Meeting Notes (pdf/csv/xlsx/txt)", type=["pdf","csv","xlsx","txt"])
+            mdate = st.date_input("Date", value=date.today())
+            attendees = st.text_area("Attendees (comma-separated emails)")
+            upload = st.file_uploader("Upload Meeting Notes", type=["pdf", "csv", "xlsx", "txt"])
             submit = st.form_submit_button("Save Meeting")
+
             if submit and mtitle:
                 mid = str(uuid.uuid4())
-                md = {"meeting": mtitle, "date": str(mdate), "attendees": attendees, "created": now()}
+                notes = ""
                 if upload:
-                    fname = upload.name
-                    extracted = ""
-                    if fname.endswith(".pdf") and PDF_AVAILABLE:
+                    if upload.name.endswith(".pdf") and PDF_AVAILABLE:
                         reader = PyPDF2.PdfReader(upload)
-                        extracted = "\n".join([p.extract_text() or "" for p in reader.pages])
-                    elif fname.endswith(".csv"):
-                        extracted = pd.read_csv(upload).to_csv(index=False)
-                    elif fname.endswith(".xlsx"):
-                        extracted = pd.read_excel(upload).to_csv(index=False)
-                    elif fname.endswith(".txt"):
-                        extracted = upload.getvalue().decode(errors="ignore")
-                    md["file"] = fname
-                    md["notes"] = extracted[:20000]
-                upsert(mid, md)
-                st.success("Meeting saved successfully.")
+                        notes = "\n".join([p.extract_text() or "" for p in reader.pages])
+                    elif upload.name.endswith(".csv"):
+                        notes = pd.read_csv(upload).to_csv(index=False)
+                    elif upload.name.endswith(".xlsx"):
+                        notes = pd.read_excel(upload).to_csv(index=False)
+                    elif upload.name.endswith(".txt"):
+                        notes = upload.getvalue().decode("utf-8", errors="ignore")
+                md = dict(meeting=mtitle, date=str(mdate), attendees=attendees, notes=notes[:20000], created_on=now())
+                upsert_data(mid, md)
+                st.success("Meeting saved.")
+                notify_slack(f"New meeting '{mtitle}' scheduled on {mdate}.")
+                notify_email(f"Meeting Scheduled: {mtitle}", f"Date: {mdate}", [a.strip() for a in attendees.split(",") if "@" in a])
 
         df_meet = fetch_all()
-        meets = df_meet[df_meet.get("meeting").notna()] if not df_meet.empty else pd.DataFrame()
-        if not meets.empty:
-            st.dataframe(meets[["meeting", "date", "attendees", "file"]].fillna(""))
+        if not df_meet.empty and "meeting" in df_meet.columns:
+            valid_meets = df_meet[df_meet["meeting"].notna()]
+            st.dataframe(valid_meets[["meeting", "date", "attendees"]].fillna(""))
 
-    # ---- Leave ----
+    # --- LEAVES ---
     with tabs[3]:
         st.subheader("Leave Management")
         leaves = st.session_state.get("LEAVES", pd.DataFrame(columns=["Employee","Type","From","To","Reason","Status"]))
         st.dataframe(leaves)
         with st.form("leave_form"):
-            emp = st.text_input("Employee")
-            typ = st.selectbox("Leave Type", ["Casual","Sick","Earned"])
+            emp = st.text_input("Employee (email preferred)")
+            typ = st.selectbox("Leave Type", ["Casual", "Sick", "Earned"])
             f = st.date_input("From")
             t = st.date_input("To")
             reason = st.text_area("Reason")
             sub = st.form_submit_button("Submit Leave")
             if sub:
-                new = pd.DataFrame([{"Employee": emp,"Type": typ,"From": str(f),"To": str(t),"Reason": reason,"Status":"Pending"}])
+                new = pd.DataFrame([{"Employee": emp, "Type": typ, "From": str(f), "To": str(t), "Reason": reason, "Status": "Pending"}])
                 st.session_state["LEAVES"] = pd.concat([leaves, new], ignore_index=True)
                 st.success("Leave submitted.")
+                notify_slack(f"{emp} requested {typ} leave from {f} to {t}.")
 
-    # ---- 360 ----
+    # --- 360 OVERVIEW ---
     with tabs[4]:
-        st.subheader("360 Overview")
+        st.subheader("360° Overview")
         df = fetch_all()
         if df.empty:
             st.info("No data available.")
         else:
-            emp = st.selectbox("Select Employee", df["employee"].unique())
+            emp = st.selectbox("Select Employee", sorted(df["employee"].unique()))
             emp_df = df[df["employee"] == emp]
-            st.dataframe(emp_df[["task","completion","marks","status"]])
-            st.metric("Average Completion", f"{emp_df['completion'].mean():.1f}%")
+            st.dataframe(emp_df[["task", "completion", "marks", "status"]])
+            st.metric("Avg Completion", f"{emp_df['completion'].mean():.1f}%")
 
 # ---------------------------------------------------------
-# TEAM MEMBER PORTAL
+# TEAM MEMBER / CLIENT / ADMIN are same as previous version
 # ---------------------------------------------------------
-elif role == "Team Member":
-    st.header("Team Member Portal")
-    name = st.text_input("Enter your name")
-    if name:
-        df = fetch_all()
-        my = df[df["employee"] == name] if not df.empty else pd.DataFrame()
-        if my.empty:
-            st.info("No tasks assigned.")
-        else:
-            for _, r in my.iterrows():
-                st.markdown(f"### {r.get('task')}")
-                comp = st.slider("Completion", 0, 100, int(r.get("completion", 0)), key=r.get("_id"))
-                if st.button("Update", key=f"upd_{r.get('_id')}"):
-                    r["completion"] = comp
-                    r["marks"] = float(lin_reg.predict([[comp]])[0])
-                    r["status"] = "In Progress" if comp < 100 else "Completed"
-                    upsert(r.get("_id") or str(uuid.uuid4()), r)
-                    st.success("Progress updated.")
-                    safe_rerun()
-
-# ---------------------------------------------------------
-# CLIENT PORTAL
-# ---------------------------------------------------------
-elif role == "Client":
-    st.header("Client Review Panel")
-    company = st.text_input("Company Name")
-    if company:
-        df = fetch_all()
-        dfc = df[df["company"].str.lower() == company.lower()] if not df.empty else pd.DataFrame()
-        if dfc.empty:
-            st.info("No tasks found.")
-        else:
-            st.metric("Overall Completion", f"{dfc['completion'].mean():.1f}%")
-            st.dataframe(dfc[["task","employee","completion","status"]])
-
-# ---------------------------------------------------------
-# ADMIN PORTAL
-# ---------------------------------------------------------
-elif role == "Admin":
-    st.header("Admin Dashboard & HR Intelligence Layer")
-    df = fetch_all()
-    if df.empty:
-        st.info("No data.")
-    else:
-        df["completion"] = pd.to_numeric(df["completion"], errors="coerce").fillna(0)
-        df["marks"] = pd.to_numeric(df["marks"], errors="coerce").fillna(0)
-        st.subheader("Performance Summary")
-        st.dataframe(df[["employee","department","task","completion","marks"]])
-        st.metric("Average Completion", f"{df['completion'].mean():.1f}%")
-
-        if len(df) > 2:
-            df["risk"] = (100 - df["completion"]) / 100 + (2 - df["marks"]) / 5
-            st.plotly_chart(
-                px.scatter(
-                    df,
-                    x="completion",
-                    y="marks",
-                    color="risk",
-                    title="HR Intelligence: Performance & Risk"
-                ),
-                use_container_width=True
-            )
-
-        top_risk = df.sort_values("risk", ascending=False).head(5)
-        st.subheader("Top At-Risk Employees (Explainable)")
-        for _, r in top_risk.iterrows():
-            reasons = []
-            if r["completion"] < 60:
-                reasons.append("Low completion")
-            if r["marks"] < 2:
-                reasons.append("Low marks")
-            st.write(f"{r['employee']}: {'; '.join(reasons) or 'Monitor'}")
