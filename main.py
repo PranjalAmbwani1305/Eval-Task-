@@ -55,13 +55,13 @@ HF_TOKEN = st.secrets.get("HUGGINGFACEHUB_API_TOKEN", "")
 # Pinecone client setup (if available)
 if PINECONE_AVAILABLE and PINECONE_API_KEY:
     pc = Pinecone(api_key=PINECONE_API_KEY)
-    TASK_INDEX_NAME = "awi-task"
-    FEEDBACK_INDEX_NAME = "awi-feedback"
-    LEAVE_INDEX_NAME = "awi-leave"
+    TASK_INDEX_NAME = "task"
+    FEEDBACK_INDEX_NAME = "task"
+    LEAVE_INDEX_NAME = "task"
     # Create indexes if not exist (safely)
     for idx in [TASK_INDEX_NAME, FEEDBACK_INDEX_NAME, LEAVE_INDEX_NAME]:
         if idx not in [i["name"] for i in pc.list_indexes()]:
-            pc.create_index(name=task, dimension=1024, metric="cosine", spec=ServerlessSpec(cloud="aws", region="us-east-1"))
+            pc.create_index(name="task", dimension=1024, metric="cosine", spec=ServerlessSpec(cloud="aws", region="us-east-1"))
     task_index = pc.Index(TASK_INDEX_NAME)
     feedback_index = pc.Index(FEEDBACK_INDEX_NAME)
     leave_index = pc.Index(LEAVE_INDEX_NAME)
