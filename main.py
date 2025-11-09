@@ -1,47 +1,62 @@
-# app.py — AI-Powered Task Management Suite
+# ===============================================
+# AI Task Management Suite (Agentic AI + EvalTrack)
+# Streamlit App – Fully Compatible with Pinecone v4+
+# ===============================================
+
 import streamlit as st
 import numpy as np
 import pandas as pd
 import uuid
 from datetime import datetime
-
-# ML Imports
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.svm import SVC
+from pinecone import Pinecone, ServerlessSpec
+
 
 # --------------------------
-# Streamlit Page Settings
+# Streamlit Page Setup
 # --------------------------
 st.set_page_config(page_title="AI Task Management Suite", page_icon="💼", layout="wide")
-st.title("💼 AI-Powered Task Completion & Review System")
+st.title("💼 AI-Powered Task Management & Performance Evaluation System")
+
 
 # --------------------------
-# Pinecone Setup
+# Pinecone Initialization (v4+)
 # --------------------------
-index_name = "task"
-dimension = 128  # Smaller dimension for demo; can be increased
+INDEX_NAME = "task"
+DIMENSION = 128  # or 1024 if you use embeddings
 
 def init_pinecone():
-    """Initialize Pinecone with fallback for older/newer clients"""
+    """Initialize Pinecone (latest version)"""
     try:
-        import pinecone
-        api_key = st.secrets["PINECONE_API_KEY"]
-        pinecone.init(api_key=api_key)
-        if index_name not in pinecone.list_indexes():
-            pinecone.create_index(name=index_name, dimension=dimension, metric="cosine")
-        return pinecone, pinecone.Index(index_name)
+        api_key = st.secrets["PINECONE_API_KEY"]  # stored securely in secrets.toml
+        pc = Pinecone(api_key=api_key)
+
+        existing = [i["name"] for i in pc.list_indexes()]
+        if INDEX_NAME not in existing:
+            pc.create_index(
+                name=INDEX_NAME,
+                dimension=DIMENSION,
+                metric="cosine",
+                spec=ServerlessSpec(cloud="aws", region="us-east-1")
+            )
+        index = pc.Index(INDEX_NAME)
+        return pc, index
+
     except Exception as e:
-        st.error("❌ Pinecone initialization failed. Please check your API key or version.")
+        st.error("❌ Pinecone initialization failed. Check your API key or SDK version.")
         st.write(e)
         return None, None
 
-pinecone_client, pinecone_index = init_pinecone()
-if not pinecone_client:
+
+pc, index = init_pinecone()
+if not pc:
     st.stop()
 
+
 # --------------------------
-# Machine Learning Setup
+# Machine Learning Models
 # --------------------------
 lin_reg = LinearRegression().fit([[0], [100]], [0, 5])
 log_reg = LogisticRegression(solver="liblinear").fit([[0], [50], [100]], [0, 0, 1])
@@ -51,10 +66,11 @@ X_train = vectorizer.fit_transform(["good work", "excellent", "needs improvement
 y_train = [1, 1, 0, 0]
 svm_clf = SVC().fit(X_train, y_train)
 
+
 # --------------------------
 # Helper Functions
 # --------------------------
-def random_vector(dim=dimension):
+def random_vector(dim=DIMENSION):
     return np.random.rand(dim).tolist()
 
 def safe_metadata(md: dict):
@@ -71,27 +87,29 @@ def classify_performance(tasks):
         emp = task.get('employee', 'Unknown')
         score = task.get('marks', 0)
         perf.setdefault(emp, []).append(score)
-    classification = {}
+    out = {}
     for emp, scores in perf.items():
         avg = np.mean(scores)
         if avg >= 4:
-            classification[emp] = "High"
+            out[emp] = "High"
         elif avg >= 2.5:
-            classification[emp] = "Medium"
+            out[emp] = "Medium"
         else:
-            classification[emp] = "Low"
-    return classification
+            out[emp] = "Low"
+    return out
+
 
 # --------------------------
-# Sidebar Role Selector
+# Role Selection
 # --------------------------
 role = st.sidebar.radio("🔑 Login as", ["👩‍💻 Team Member", "🧑‍💼 Manager", "👨‍💼 Client", "🛠️ Admin"])
 
-# --------------------------
-# TEAM MEMBER SECTION
-# --------------------------
+
+# ======================================================
+# 👩‍💻 TEAM MEMBER SECTION
+# ======================================================
 if role == "👩‍💻 Team Member":
-    st.header("🧑‍💻 Submit Your Task")
+    st.header("👩‍💻 Submit Your Task")
 
     company = st.text_input("🏢 Company Name")
     employee = st.text_input("👤 Your Name")
@@ -120,22 +138,23 @@ if role == "👩‍💻 Team Member":
             })
 
             try:
-                pinecone_index.upsert(vectors=[{"id": task_id, "values": random_vector(), "metadata": metadata}])
+                index.upsert(vectors=[{"id": task_id, "values": random_vector(), "metadata": metadata}])
                 st.success(f"✅ Task '{task}' submitted successfully by {employee}")
             except Exception as e:
                 st.error("❌ Failed to submit task.")
                 st.write(e)
 
-# --------------------------
-# CLIENT SECTION
-# --------------------------
+
+# ======================================================
+# 👨‍💼 CLIENT SECTION
+# ======================================================
 elif role == "👨‍💼 Client":
-    st.header("📊 Client Task Viewer")
+    st.header("📊 Client View of Approved Tasks")
 
     company = st.text_input("🏢 Company Name")
     if st.button("🔍 View Approved Tasks") and company:
         try:
-            res = pinecone_index.query(
+            res = index.query(
                 vector=random_vector(),
                 top_k=100,
                 include_metadata=True,
@@ -151,14 +170,15 @@ elif role == "👨‍💼 Client":
             st.error("❌ Failed to query Pinecone.")
             st.write(e)
 
-# --------------------------
-# MANAGER SECTION
-# --------------------------
+
+# ======================================================
+# 🧑‍💼 MANAGER SECTION
+# ======================================================
 elif role == "🧑‍💼 Manager":
-    st.header("🧭 Manager Dashboard")
+    st.header("🧭 Manager Review & Dashboard")
 
     try:
-        res = pinecone_index.query(vector=random_vector(), top_k=200, include_metadata=True)
+        res = index.query(vector=random_vector(), top_k=200, include_metadata=True)
         matches = res.matches if hasattr(res, "matches") else res["matches"]
         tasks = [m.metadata for m in matches] if matches else []
     except Exception as e:
@@ -183,7 +203,7 @@ elif role == "🧑‍💼 Manager":
         c3.metric("On Track", on_track)
         c4.metric("Delayed", delayed)
 
-        st.subheader("🔥 Employee Performance")
+        st.subheader("🔥 Employee Performance Classification")
         perf = classify_performance(tasks)
         perf_df = pd.DataFrame(list(perf.items()), columns=["Employee", "Category"])
         st.dataframe(perf_df)
@@ -198,15 +218,15 @@ elif role == "🧑‍💼 Manager":
             else:
                 st.warning("⚠️ Please enter some feedback text.")
 
-# --------------------------
-# ADMIN SECTION
-# --------------------------
+
+# ======================================================
+# 🛠️ ADMIN SECTION
+# ======================================================
 elif role == "🛠️ Admin":
     st.header("🛠️ Admin Control Panel")
-    st.write("View, manage, and control all system data across roles and companies.")
 
     try:
-        res = pinecone_index.query(vector=random_vector(), top_k=300, include_metadata=True)
+        res = index.query(vector=random_vector(), top_k=300, include_metadata=True)
         matches = res.matches if hasattr(res, "matches") else res["matches"]
         tasks = [m.metadata for m in matches] if matches else []
     except Exception as e:
@@ -217,7 +237,7 @@ elif role == "🛠️ Admin":
     if tasks:
         df = pd.DataFrame(tasks)
 
-        st.subheader("📊 Global System Stats")
+        st.subheader("📊 Global System Overview")
         total_tasks = len(df)
         total_companies = len(set(df.get("company", [])))
         total_employees = len(set(df.get("employee", [])))
@@ -242,24 +262,29 @@ elif role == "🛠️ Admin":
             perf = df.groupby("employee")["marks"].mean().reset_index()
             st.bar_chart(perf.set_index("employee"))
 
-        st.subheader("⬇️ Export All Data")
+        st.subheader("⬇️ Export Data")
         csv = df.to_csv(index=False).encode("utf-8")
         st.download_button("📥 Download All Task Data", csv, "all_tasks.csv", "text/csv")
 
         st.subheader("⚙️ Pinecone Index Management")
-        st.warning("Deleting the index will permanently remove all stored data!")
+        st.warning("Deleting the index will permanently remove all data!")
 
         if st.button("🧹 Delete Index"):
             try:
-                pinecone_client.delete_index(index_name)
-                st.success(f"✅ Index '{index_name}' deleted successfully.")
+                pc.delete_index(INDEX_NAME)
+                st.success(f"✅ Index '{INDEX_NAME}' deleted successfully.")
             except Exception as e:
                 st.error("❌ Failed to delete index.")
                 st.write(e)
 
         if st.button("🚀 Recreate Index"):
             try:
-                pinecone_client.create_index(name=index_name, dimension=dimension, metric="cosine")
+                pc.create_index(
+                    name=INDEX_NAME,
+                    dimension=DIMENSION,
+                    metric="cosine",
+                    spec=ServerlessSpec(cloud="aws", region="us-east-1")
+                )
                 st.success("✅ Index recreated successfully.")
             except Exception as e:
                 st.error("❌ Failed to recreate index.")
