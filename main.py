@@ -11,7 +11,6 @@ from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.svm import SVC
-from sklearn.cluster import KMeans
 import plotly.express as px
 import plotly.graph_objects as go
 
@@ -44,18 +43,11 @@ def rand_vec(): return np.random.rand(DIMENSION).tolist()
 # -----------------------------
 lin_reg = LinearRegression().fit([[0], [50], [100]], [0, 2.5, 5])
 log_reg = LogisticRegression().fit([[0], [40], [80], [100]], [0, 0, 1, 1])
-
 comments = ["excellent work", "needs improvement", "bad performance", "great job", "average"]
 sentiments = [1, 0, 0, 1, 0]
 vectorizer = CountVectorizer()
 svm_clf = SVC().fit(vectorizer.fit_transform(comments), sentiments)
 rf = RandomForestClassifier().fit(np.array([[10, 2], [50, 1], [90, 0], [100, 0]]), [0, 1, 0, 0])
-
-# -----------------------------
-# LOGGER
-# -----------------------------
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("safe_meta")
 
 # -----------------------------
 # HELPERS
@@ -82,9 +74,9 @@ def safe_upsert(id_, vec, md, retries=2, delay=1.5):
             index.upsert([{"id": id_, "values": vec, "metadata": md}])
             return True
         except Exception as e:
-            logger.warning(f"Upsert attempt {attempt+1} failed: {e}")
+            logging.warning(f"Upsert attempt {attempt+1} failed: {e}")
             time.sleep(delay)
-    st.error("❌ Pinecone upsert failed after multiple retries.")
+    st.error("❌ Pinecone upsert failed after retries.")
     return False
 
 def fetch_all():
@@ -106,10 +98,10 @@ role = st.sidebar.selectbox("🔐 Login as", ["Manager", "Team Member", "Client"
 current_month = datetime.now().strftime("%B %Y")
 
 # -----------------------------
-# MANAGER COMMAND CENTER
+# MANAGER DASHBOARD (TABS)
 # -----------------------------
 if role == "Manager":
-    st.header("👑 Manager Command Center")
+    st.header("👑 Manager Dashboard")
 
     df = fetch_all()
     if df.empty:
@@ -121,183 +113,237 @@ if role == "Manager":
             else:
                 df[col] = 0
 
-        # 1️⃣ Task Summary
-        st.subheader("📊 Task Summary Overview")
-        total = len(df)
-        done = len(df[df["completion"] == 100])
-        progress = len(df[(df["completion"] > 0) & (df["completion"] < 100)])
-        pending = len(df[df["completion"] == 0])
-        overdue = len(df[df["status"].astype(str).str.contains("Delayed", case=False, na=False)])
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+            "📊 Task Summary", "🌡️ Heatmap", "🤖 AI Alerts", "🎯 Goal Tracker",
+            "🧩 Adjustments", "💬 Feedback", "🧾 Appraisals"
+        ])
 
-        cols = st.columns(5)
-        metrics = [("📋 Total", total), ("🕐 Pending", pending),
-                   ("🚧 In Progress", progress), ("✅ Completed", done), ("⚠️ Overdue", overdue)]
-        for c, (label, value) in zip(cols, metrics):
-            c.metric(label, value)
+        # TAB 1: Task Summary
+        with tab1:
+            st.subheader("📊 Task Summary Overview")
+            total = len(df)
+            done = len(df[df["completion"] == 100])
+            progress = len(df[(df["completion"] > 0) & (df["completion"] < 100)])
+            pending = len(df[df["completion"] == 0])
+            overdue = len(df[df["status"].astype(str).str.contains("Delayed", case=False, na=False)])
+            cols = st.columns(5)
+            for c, (label, value) in zip(cols, [
+                ("📋 Total", total), ("🕐 Pending", pending),
+                ("🚧 In Progress", progress), ("✅ Completed", done),
+                ("⚠️ Overdue", overdue)
+            ]):
+                c.metric(label, value)
+            fig_pie = px.pie(
+                pd.DataFrame({"Status": ["Completed", "In Progress", "Pending", "Overdue"],
+                              "Count": [done, progress, pending, overdue]}),
+                values="Count", names="Status", title="Task Distribution")
+            st.plotly_chart(fig_pie, use_container_width=True)
 
-        # 2️⃣ Team Heatmap
-        st.subheader("🌡️ Team Performance Heatmap")
-        if "employee" in df.columns:
-            pivot = df.pivot_table(index="employee", values="completion", aggfunc="mean")
-            fig = px.imshow(pivot, color_continuous_scale="greens", title="Team Performance %")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No employee data available for heatmap.")
+        # TAB 2: Heatmap
+        with tab2:
+            st.subheader("🌡️ Team Performance Heatmap")
+            if "employee" in df.columns:
+                pivot = df.pivot_table(index="employee", values="completion", aggfunc="mean")
+                fig = px.imshow(pivot, color_continuous_scale="greens", title="Team Performance %")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No employee data available.")
 
-        # 3️⃣ AI Alerts
-        st.subheader("🤖 AI Alerts & Insights")
-        alerts = []
-        for _, row in df.iterrows():
-            if row["completion"] < 30:
-                alerts.append(f"⚠️ Low progress on '{row['task']}' ({row.get('employee','N/A')})")
-            if "Delayed" in str(row.get("status", "")):
-                alerts.append(f"⏰ '{row['task']}' may miss the deadline.")
-            if row["marks"] < 2:
-                alerts.append(f"❗ '{row['task']}' underperforming (Marks {row['marks']})")
-        if alerts:
-            for a in alerts:
-                st.warning(a)
-        else:
-            st.success("✅ No AI alerts detected. Team performance normal.")
+        # TAB 3: AI Alerts
+        with tab3:
+            st.subheader("🤖 AI Alerts & Insights")
+            alerts = []
+            for _, r in df.iterrows():
+                if r["completion"] < 30:
+                    alerts.append(f"⚠️ Low progress on '{r['task']}' ({r.get('employee')})")
+                if "Delayed" in str(r.get("status", "")):
+                    alerts.append(f"⏰ '{r['task']}' may miss the deadline.")
+                if r["marks"] < 2:
+                    alerts.append(f"❗ Underperforming task '{r['task']}' (Marks {r['marks']})")
+            if alerts:
+                for a in alerts:
+                    st.warning(a)
+            else:
+                st.success("✅ No performance issues detected.")
 
-        # 4️⃣ Goal Tracker
-        st.subheader("🎯 Goal Tracker")
-        avg_completion = df["completion"].mean()
-        goal = 85
-        fig = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=avg_completion,
-            gauge={"axis": {"range": [0, 100]},
-                   "bar": {"color": "green"},
-                   "threshold": {"value": goal, "line": {"color": "red", "width": 4}}},
-            title={"text": f"Overall Team Progress (Target {goal}%)"}
-        ))
-        st.plotly_chart(fig, use_container_width=True)
-
-        # 5️⃣ Managerial Adjustments
-        st.subheader("🧩 Managerial Adjustments")
-        for _, r in df.iterrows():
-            with st.expander(f"⚙️ Adjust '{r['task']}' ({r.get('employee')})"):
-                new_completion = st.slider(f"Adjust Completion %", 0, 100, int(r["completion"]))
-                new_marks = float(lin_reg.predict([[new_completion]])[0])
-                note = st.text_input(f"Manager Comment for {r['task']}")
-                if st.button(f"Save Adjustment for {r['task']}", key=f"adj_{r['_id']}"):
-                    md = safe_meta({
-                        **r,
-                        "completion": new_completion,
-                        "marks": new_marks,
-                        "manager_note": note,
-                        "reviewed": True,
-                        "updated_on": now()
-                    })
-                    safe_upsert(r["_id"], rand_vec(), md)
-                    st.success(f"Updated task '{r['task']}' successfully!")
-                    st.rerun()
-
-    # -----------------------------
-    # 360° EMPLOYEE FEEDBACK & INSIGHTS
-    # -----------------------------
-    st.header("💬 360° Employee Performance & Feedback Insights")
-
-    df_feedback = fetch_all()
-    if df_feedback.empty:
-        st.info("No feedback data available yet.")
-    else:
-        st.subheader("🧠 AI Sentiment Analysis on Feedback")
-        with st.form("feedback_form"):
-            emp = st.selectbox("Select Employee", sorted(df_feedback["employee"].dropna().unique()))
-            feedback_text = st.text_area("Enter Feedback")
-            reviewer = st.text_input("Reviewer Name (optional)")
-            source = st.selectbox("Feedback Type", ["Self", "Peer", "Manager"])
-            submit_feedback = st.form_submit_button("Submit Feedback")
-
-            if submit_feedback and feedback_text:
-                sentiment_val = int(svm_clf.predict(vectorizer.transform([feedback_text]))[0])
-                sentiment_label = "Positive" if sentiment_val == 1 else "Negative"
-                md = safe_meta({
-                    "employee": emp,
-                    "feedback_text": feedback_text,
-                    "reviewer": reviewer or "Anonymous",
-                    "feedback_source": source,
-                    "sentiment": sentiment_label,
-                    "timestamp": now()
-                })
-                fid = str(uuid.uuid4())
-                safe_upsert(fid, rand_vec(), md)
-                st.success(f"✅ Feedback recorded for {emp} ({sentiment_label})")
-
-        feedback_df = df_feedback[df_feedback["sentiment"].isin(["Positive", "Negative"])]
-        if not feedback_df.empty:
-            score_df = (
-                feedback_df.groupby("employee")["sentiment"]
-                .apply(lambda x: (x == "Positive").sum() / len(x) * 100)
-                .reset_index(name="Positivity (%)")
-            )
-            st.dataframe(score_df)
-            fig = px.bar(score_df, x="employee", y="Positivity (%)", color="Positivity (%)",
-                         title="Employee Positivity Scores", range_y=[0, 100])
-            st.plotly_chart(fig, use_container_width=True)
-            avg_team_sentiment = score_df["Positivity (%)"].mean()
-            fig_gauge = go.Figure(go.Indicator(
+        # TAB 4: Goal Tracker
+        with tab4:
+            st.subheader("🎯 Goal Tracker")
+            avg = df["completion"].mean()
+            goal = 85
+            fig = go.Figure(go.Indicator(
                 mode="gauge+number",
-                value=avg_team_sentiment,
+                value=avg,
                 gauge={"axis": {"range": [0, 100]},
-                       "bar": {"color": "green" if avg_team_sentiment > 60 else "red"}},
-                title={"text": "Overall Team Sentiment Health"}
-            ))
-            st.plotly_chart(fig_gauge, use_container_width=True)
-            st.subheader("🗂️ Feedback History")
-            st.dataframe(
-                feedback_df[["employee", "feedback_text", "reviewer", "feedback_source", "sentiment"]],
-                use_container_width=True
-            )
+                       "bar": {"color": "green"},
+                       "threshold": {"value": goal, "line": {"color": "red", "width": 4}}},
+                title={"text": f"Team Progress (Goal: {goal}%)"}))
+            st.plotly_chart(fig, use_container_width=True)
 
-    # -----------------------------
-    # MANAGERIAL ACTIONS & APPROVAL HUB
-    # -----------------------------
-    st.header("🧾 Managerial Actions & Approvals Hub")
+        # TAB 5: Managerial Adjustments
+        with tab5:
+            st.subheader("🧩 Managerial Adjustments")
+            for _, r in df.iterrows():
+                with st.expander(f"⚙️ Adjust '{r['task']}' ({r.get('employee')})"):
+                    new_completion = st.slider("Completion %", 0, 100, int(r["completion"]))
+                    new_marks = float(lin_reg.predict([[new_completion]])[0])
+                    note = st.text_input("Manager Note", key=f"note_{r['_id']}")
+                    if st.button("Save", key=f"save_{r['_id']}"):
+                        md = safe_meta({**r, "completion": new_completion,
+                                        "marks": new_marks, "manager_note": note,
+                                        "updated_on": now()})
+                        safe_upsert(r["_id"], rand_vec(), md)
+                        st.success(f"Updated '{r['task']}'")
 
-    df_actions = fetch_all()
-    if df_actions.empty:
-        st.info("No data for actions yet.")
+        # TAB 6: Feedback
+        with tab6:
+            st.subheader("💬 360° Feedback & Sentiment")
+            df_feedback = fetch_all()
+            if df_feedback.empty:
+                st.info("No feedback found.")
+            else:
+                with st.form("feedback_form"):
+                    emp = st.selectbox("Select Employee", sorted(df_feedback["employee"].dropna().unique()))
+                    text = st.text_area("Feedback")
+                    src = st.selectbox("Source", ["Self", "Peer", "Manager"])
+                    submit = st.form_submit_button("Submit Feedback")
+                    if submit and text:
+                        sent = int(svm_clf.predict(vectorizer.transform([text]))[0])
+                        sentiment = "Positive" if sent == 1 else "Negative"
+                        fid = str(uuid.uuid4())
+                        md = safe_meta({"employee": emp, "feedback_text": text,
+                                        "feedback_source": src, "sentiment": sentiment,
+                                        "timestamp": now()})
+                        safe_upsert(fid, rand_vec(), md)
+                        st.success(f"Feedback saved ({sentiment})")
+
+                feedback_df = df_feedback[df_feedback["sentiment"].isin(["Positive", "Negative"])]
+                if not feedback_df.empty:
+                    score_df = feedback_df.groupby("employee")["sentiment"].apply(
+                        lambda x: (x == "Positive").sum() / len(x) * 100
+                    ).reset_index(name="Positivity (%)")
+                    st.plotly_chart(px.bar(score_df, x="employee", y="Positivity (%)",
+                                           color="Positivity (%)", title="Employee Sentiment"),
+                                    use_container_width=True)
+                    avg_sent = score_df["Positivity (%)"].mean()
+                    st.metric("Average Team Sentiment", f"{avg_sent:.1f}%")
+                    st.subheader("🗂️ Feedback History")
+                    expected = ["employee", "feedback_text", "feedback_source", "sentiment"]
+                    available = [c for c in expected if c in feedback_df.columns]
+                    st.dataframe(feedback_df[available], use_container_width=True)
+
+        # TAB 7: Appraisals
+        with tab7:
+            st.subheader("🧾 Appraisals")
+            employees = df["employee"].dropna().unique()
+            emp = st.selectbox("Select Employee", employees)
+            emp_df = df[df["employee"] == emp]
+            if not emp_df.empty:
+                avg_m, avg_c = emp_df["marks"].mean(), emp_df["completion"].mean()
+                st.metric("Avg Marks", f"{avg_m:.2f}")
+                st.metric("Avg Completion", f"{avg_c:.1f}%")
+                if st.button(f"🧠 Generate Appraisal for {emp}"):
+                    report = (f"Employee: {emp}\nPerformance: {avg_m:.2f}\nCompletion: {avg_c:.1f}%\n"
+                              f"Summary: {'Strong' if avg_m > 3 else 'Moderate'} performer "
+                              f"with {'excellent' if avg_c > 80 else 'improving'} consistency.")
+                    st.text_area("Appraisal Report", report)
+                    st.download_button("📄 Download Appraisal", report, f"{emp}_appraisal.txt")
+
+# -----------------------------
+# TEAM MEMBER (AUTO FEEDBACK)
+# -----------------------------
+elif role == "Team Member":
+    st.header("👷 Team Member Panel — Auto Feedback Enabled")
+    company = st.text_input("Company Name")
+    employee = st.text_input("Your Name")
+
+    if st.button("🔄 Load My Tasks"):
+        res = index.query(
+            vector=rand_vec(),
+            top_k=500,
+            include_metadata=True,
+            filter={"employee": {"$eq": employee}}
+        )
+        st.session_state["tasks"] = [(m.id, m.metadata) for m in res.matches or []]
+        st.success(f"Loaded {len(st.session_state['tasks'])} tasks.")
+
+    for tid, md in st.session_state.get("tasks", []):
+        st.subheader(md.get("task"))
+        st.write(md.get("description"))
+        curr = float(md.get("completion", 0))
+        new = st.slider(f"Completion for {md.get('task')}", 0, 100, int(curr))
+        if st.button(f"Submit {md.get('task')}", key=tid):
+            marks = float(lin_reg.predict([[new]])[0])
+            track = "On Track" if log_reg.predict([[new]])[0] == 1 else "Delayed"
+            miss = rf.predict([[new, 0]])[0]
+
+            if new >= 90:
+                feedback = "🌟 Excellent work! You’ve nearly completed the task."
+                sentiment = "Positive"
+            elif 60 <= new < 90:
+                feedback = "👍 Good progress! Stay consistent."
+                sentiment = "Positive"
+            elif 30 <= new < 60:
+                feedback = "🕐 Halfway there. Keep pushing."
+                sentiment = "Neutral"
+            else:
+                feedback = "⚠️ Low progress. Please focus on deadlines."
+                sentiment = "Negative"
+
+            md2 = safe_meta({
+                **md,
+                "completion": new,
+                "marks": marks,
+                "status": track,
+                "deadline_risk": "High" if miss else "Low",
+                "submitted_on": now(),
+                "auto_feedback": feedback,
+                "auto_sentiment": sentiment
+            })
+            safe_upsert(tid, rand_vec(), md2)
+            st.success(f"Updated {md.get('task')} ({track})")
+            st.info(f"🤖 **AI Feedback:** {feedback}")
+
+# -----------------------------
+# CLIENT
+# -----------------------------
+elif role == "Client":
+    st.header("🤝 Client Review Panel")
+    company = st.text_input("Company Name")
+    if st.button("🔄 Load Completed Tasks"):
+        res = index.query(vector=rand_vec(), top_k=500, include_metadata=True,
+                          filter={"reviewed": {"$eq": True}})
+        st.session_state["ctasks"] = [(m.id, m.metadata) for m in res.matches or []]
+        st.success(f"Loaded {len(st.session_state['ctasks'])} tasks.")
+    for tid, md in st.session_state.get("ctasks", []):
+        st.subheader(md.get("task"))
+        st.write(f"Employee: {md.get('employee')}")
+        st.write(f"Completion: {md.get('completion')}%")
+        comment = st.text_area(f"Feedback for {md.get('task')}", key=f"c_{tid}")
+        if st.button(f"Approve {md.get('task')}", key=f"approve_{tid}"):
+            md2 = safe_meta({**md, "client_reviewed": True,
+                             "client_comments": comment, "client_approved_on": now()})
+            safe_upsert(tid, rand_vec(), md2)
+            st.success(f"Approved {md.get('task')}")
+
+# -----------------------------
+# ADMIN
+# -----------------------------
+elif role == "Admin":
+    st.header("🧮 Admin Dashboard")
+    df = fetch_all()
+    if df.empty:
+        st.warning("No data found.")
     else:
-        employees = df_actions["employee"].dropna().unique()
-        selected_emp = st.selectbox("Select Employee for Appraisal", employees)
-        emp_data = df_actions[df_actions["employee"] == selected_emp]
-        if not emp_data.empty:
-            avg_mark = emp_data["marks"].mean()
-            avg_comp = emp_data["completion"].mean()
-            st.metric("Average Marks", f"{avg_mark:.2f}")
-            st.metric("Average Completion", f"{avg_comp:.1f}%")
-
-            # Generate AI appraisal summary
-            if st.button(f"🧠 Generate AI Appraisal for {selected_emp}"):
-                feedbacks = emp_data.get("manager_note", "")
-                summary = (
-                    f"**Employee:** {selected_emp}\n"
-                    f"**Performance Score:** {avg_mark:.2f}\n"
-                    f"**Task Completion:** {avg_comp:.1f}%\n"
-                    f"**AI Summary:** {selected_emp} shows consistent performance with a "
-                    f"{'strong' if avg_mark > 3 else 'moderate'} track record. "
-                    f"Recommended focus areas include timely delivery and continuous improvement.\n"
-                )
-                st.markdown(summary)
-                st.download_button(
-                    "📄 Download Appraisal Report",
-                    summary,
-                    f"{selected_emp}_appraisal.txt"
-                )
-
-            # Recognition & Notes
-            recog = st.text_area(f"💌 Recognition or Performance Note for {selected_emp}")
-            if st.button(f"Send Recognition to {selected_emp}"):
-                rid = str(uuid.uuid4())
-                md = safe_meta({
-                    "employee": selected_emp,
-                    "recognition": recog,
-                    "sentiment": "Positive",
-                    "timestamp": now(),
-                    "type": "Recognition"
-                })
-                safe_upsert(rid, rand_vec(), md)
-                st.success(f"Recognition saved for {selected_emp}")
+        for c in ["completion", "marks"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+        st.subheader("Top Employees by Marks")
+        top = df.groupby("employee")["marks"].mean().reset_index().sort_values("marks", ascending=False).head(5)
+        st.dataframe(top)
+        st.subheader("K-Means Performance Clustering")
+        from sklearn.cluster import KMeans
+        km = KMeans(n_clusters=min(3, len(df)), n_init=10).fit(df[["completion", "marks"]].fillna(0))
+        df["cluster"] = km.labels_
+        st.plotly_chart(px.scatter(df, x="completion", y="marks", color=df["cluster"].astype(str),
+                                   hover_data=["employee", "task"], title="Performance Clusters"))
+        st.download_button("📥 Download All Data", df.to_csv(index=False), "tasks.csv")
