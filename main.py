@@ -5,6 +5,7 @@ import pandas as pd
 import uuid
 import json
 import logging
+import time
 from datetime import datetime, date
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
@@ -19,7 +20,6 @@ import plotly.express as px
 st.set_page_config(page_title="AI Task System", layout="wide")
 st.title("AI-Powered Task Management System")
 
-# Pinecone setup
 PINECONE_API_KEY = st.secrets["PINECONE_API_KEY"]
 pc = Pinecone(api_key=PINECONE_API_KEY)
 INDEX_NAME = "task"
@@ -62,22 +62,16 @@ y_rf = [0, 1, 0, 0]
 rf.fit(X_rf, y_rf)
 
 # -----------------------------
-# LOGGER SETUP
+# LOGGER
 # -----------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("safe_meta")
 
 # -----------------------------
-# SAFE META CLEANER WITH LOGGING
+# SAFE META
 # -----------------------------
 def safe_meta(md):
-    """
-    Cleans and validates metadata before sending to Pinecone.
-    Converts unsupported data types and logs any problematic values.
-    Ensures all values are JSON-safe and Pinecone-compatible.
-    """
-    clean = {}
-    invalid = {}
+    clean, invalid = {}, {}
 
     for k, v in md.items():
         try:
@@ -101,7 +95,6 @@ def safe_meta(md):
             v = str(v)
         clean[k] = v
 
-    # Log and display invalids
     if invalid:
         with st.expander("⚠️ Metadata Conversion Warnings", expanded=False):
             st.warning("Some metadata fields were automatically corrected before upload.")
@@ -112,7 +105,21 @@ def safe_meta(md):
     return clean
 
 # -----------------------------
-# FETCH ALL TASKS
+# SAFE UPSERT (RETRY)
+# -----------------------------
+def safe_upsert(id_, vec, md, retries=2, delay=1.5):
+    for attempt in range(retries):
+        try:
+            index.upsert([{"id": id_, "values": vec, "metadata": md}])
+            return True
+        except Exception as e:
+            logger.warning(f"Upsert attempt {attempt+1} failed: {e}")
+            time.sleep(delay)
+    st.error("Pinecone upsert failed after multiple retries.")
+    return False
+
+# -----------------------------
+# FETCH ALL
 # -----------------------------
 def fetch_all():
     try:
@@ -136,13 +143,12 @@ role = st.sidebar.selectbox("Login as", ["Manager", "Team Member", "Client", "Ad
 current_month = datetime.now().strftime("%B %Y")
 
 # -----------------------------
-# MANAGER (BOSS)
+# MANAGER
 # -----------------------------
 if role == "Manager":
     st.header("Manager (Boss) Dashboard")
     tab1, tab2 = st.tabs(["Assign Task", "Boss Review & Adjustment"])
 
-    # Assign Task
     with tab1:
         with st.form("assign"):
             company = st.text_input("Company Name")
@@ -169,14 +175,12 @@ if role == "Manager":
                     "client_reviewed": False,
                     "assigned_on": now()
                 })
-                index.upsert([{"id": tid, "values": rand_vec(), "metadata": md}])
+                safe_upsert(tid, rand_vec(), md)
                 st.success(f"Task '{task}' assigned to {employee}")
 
-    # Boss Review Section
     with tab2:
         if st.button("🔄 Refresh Data"):
-            if "manager_df" in st.session_state:
-                del st.session_state["manager_df"]
+            st.session_state.pop("manager_df", None)
 
         if "manager_df" not in st.session_state:
             st.session_state["manager_df"] = fetch_all()
@@ -184,14 +188,18 @@ if role == "Manager":
         df = st.session_state["manager_df"]
 
         if df.empty:
-            st.warning("No tasks found in Pinecone.")
+            st.warning("No tasks found.")
         else:
             df.columns = [c.lower() for c in df.columns]
-            df["completion"] = pd.to_numeric(df.get("completion", 0), errors="coerce").fillna(0)
+            if "completion" in df.columns:
+                df["completion"] = pd.to_numeric(df["completion"], errors="coerce").fillna(0)
+            else:
+                df["completion"] = 0
+
             tasks_ready = df[df["completion"] > 0]
 
             if tasks_ready.empty:
-                st.info("No team-submitted tasks available for boss review.")
+                st.info("No team-submitted tasks yet.")
             else:
                 for _, r in tasks_ready.iterrows():
                     st.markdown(f"### {r['task']}")
@@ -212,7 +220,6 @@ if role == "Manager":
                     if st.button(f"✅ Finalize Review for {r['task']}", key=f"final_{r['_id']}"):
                         sentiment_val = int(svm_clf.predict(vectorizer.transform([comments]))[0])
                         sentiment = "Positive" if sentiment_val == 1 else "Negative"
-
                         md = safe_meta({
                             **r,
                             "completion": adjusted_completion,
@@ -223,15 +230,9 @@ if role == "Manager":
                             "approved_by_boss": approve == "Yes",
                             "reviewed_on": now()
                         })
-
-                        try:
-                            index.upsert([{"id": r["_id"], "values": rand_vec(), "metadata": md}])
-                            st.success(f"Review finalized for {r['task']} ({sentiment}) — Boss Set {adjusted_completion}%.")
-                        except Exception as e:
-                            st.error(f"Pinecone upsert failed: {e}")
-
-                        if "manager_df" in st.session_state:
-                            del st.session_state["manager_df"]
+                        safe_upsert(r["_id"], rand_vec(), md)
+                        st.success(f"Review finalized for {r['task']} ({sentiment}).")
+                        st.session_state.pop("manager_df", None)
                         st.rerun()
 
 # -----------------------------
@@ -266,7 +267,7 @@ elif role == "Team Member":
                 "submitted_on": now(),
                 "client_reviewed": False
             })
-            index.upsert([{"id": tid, "values": rand_vec(), "metadata": md2}])
+            safe_upsert(tid, rand_vec(), md2)
             st.success(f"Updated {md.get('task')} ({track}, Risk={md2['deadline_risk']})")
 
 # -----------------------------
@@ -295,7 +296,7 @@ elif role == "Client":
                 "client_comments": comment,
                 "client_approved_on": now()
             })
-            index.upsert([{"id": tid, "values": rand_vec(), "metadata": md2}])
+            safe_upsert(tid, rand_vec(), md2)
             st.success(f"Approved {md.get('task')}")
 
 # -----------------------------
@@ -305,8 +306,7 @@ elif role == "Admin":
     st.header("Admin Dashboard")
 
     if st.button("🔄 Refresh Data"):
-        if "admin_df" in st.session_state:
-            del st.session_state["admin_df"]
+        st.session_state.pop("admin_df", None)
 
     if "admin_df" not in st.session_state:
         st.session_state["admin_df"] = fetch_all()
@@ -316,8 +316,15 @@ elif role == "Admin":
     if df.empty:
         st.warning("No data found.")
     else:
-        df["marks"] = pd.to_numeric(df["marks"], errors="coerce")
-        df["completion"] = pd.to_numeric(df["completion"], errors="coerce")
+        if "completion" in df.columns:
+            df["completion"] = pd.to_numeric(df["completion"], errors="coerce").fillna(0)
+        else:
+            df["completion"] = 0
+
+        if "marks" in df.columns:
+            df["marks"] = pd.to_numeric(df["marks"], errors="coerce").fillna(0)
+        else:
+            df["marks"] = 0
 
         st.subheader("Top Employees by Marks")
         top = (
@@ -330,7 +337,7 @@ elif role == "Admin":
         st.dataframe(top)
 
         st.subheader("K-Means Clustering (Performance)")
-        if len(df) >= 1:
+        if len(df) >= 2:
             n_clusters = min(3, len(df))
             km = KMeans(n_clusters=n_clusters, n_init=10).fit(
                 df[["completion", "marks"]].fillna(0)
@@ -351,11 +358,10 @@ elif role == "Admin":
 
         avg_m = df["marks"].mean()
         avg_c = df["completion"].mean()
-        summary = (
+        st.info(
             f"Average marks: {avg_m:.2f}, completion: {avg_c:.1f}%. "
             f"Top performers: {', '.join(top['employee'].tolist())}."
         )
-        st.info(summary)
 
         st.download_button(
             "Download All Tasks (CSV)",
