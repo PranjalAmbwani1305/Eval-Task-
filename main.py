@@ -42,7 +42,7 @@ st.title("AI Workforce Intelligence Platform")
 
 PINECONE_API_KEY = st.secrets.get("PINECONE_API_KEY", "")
 HF_TOKEN = st.secrets.get("HUGGINGFACEHUB_API_TOKEN", "")
-INDEX_NAME = "workforce_tasks"
+INDEX_NAME = "tasks"
 MEETING_INDEX = "tasks"  # separate index for meetings (optional)
 DIMENSION = 1024  # keep consistent for vectors (if using embeddings)
 
