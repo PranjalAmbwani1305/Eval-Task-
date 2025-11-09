@@ -2,7 +2,7 @@ streamlit
 pandas
 numpy
 scikit-learn
-joblib
+langchain 
 scipy
 pinecone
 plotly
