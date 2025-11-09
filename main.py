@@ -1,289 +1,395 @@
 import streamlit as st
-import pandas as pd
+from pinecone import Pinecone, ServerlessSpec
 import numpy as np
-import plotly.express as px
-import plotly.figure_factory as ff
-from datetime import datetime, timedelta
-from sklearn.linear_model import LogisticRegression
-from sklearn.cluster import KMeans
+import uuid
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.svm import SVC
+from sklearn.cluster import KMeans
+import pandas as pd
+import matplotlib.pyplot as plt
+import io, csv
+from datetime import datetime, timedelta
 
-# --- PINE CONE INTEGRATION ---
-try:
-    from pinecone import Pinecone, Index
-    st.session_state.pinecone_mock = False
-except ImportError:
-    st.warning("Pinecone client not found. Running in mock (Pandas DataFrame) mode.")
-    st.session_state.pinecone_mock = True
+# ==========================================================
+# STEP 1 — Initialize Pinecone
+# ==========================================================
+pc = Pinecone(api_key=st.secrets["PINECONE_API_KEY"])
+index_name = "task"
+dimension = 1024
 
-# Configuration
-INDEX_NAME = "task"
-VECTOR_DIMENSION = 1024
+if index_name not in [idx["name"] for idx in pc.list_indexes()]:
+    pc.create_index(
+        name=index_name,
+        dimension=dimension,
+        metric="cosine",
+        spec=ServerlessSpec(cloud="aws", region="us-east-1")
+    )
 
-# --- Helper Functions for Pinecone/Mock ---
+index = pc.Index(index_name)
 
-@st.cache_resource
-def init_pinecone_connection():
-    """Initializes Pinecone and connects to the 'task' index."""
-    if st.session_state.pinecone_mock:
-        return None, "Mock Index"
-        
-    try:
-        # 1. Initialize
-        pc = Pinecone(
-            api_key=st.secrets["PINE_CONE_API_KEY"],
-            environment=st.secrets["PINE_CONE_ENVIRONMENT"]
-        )
-        
-        # 2. Check and Create Index if necessary
-        if INDEX_NAME not in pc.list_indexes().names:
-            pc.create_index(
-                INDEX_NAME, 
-                dimension=VECTOR_DIMENSION, 
-                metric='cosine', 
-                spec=pc.IndexSpec() # Or your specific cloud spec
-            )
-            st.toast(f"Pinecone Index '{INDEX_NAME}' created.", icon='🚀')
-            
-        # 3. Connect to Index
-        index = pc.Index(INDEX_NAME)
-        st.toast(f"Connected to Pinecone Index '{INDEX_NAME}'.", icon='🔗')
-        return index
-    except Exception as e:
-        st.error(f"Pinecone connection failed: {e}. Falling back to mock mode.")
-        st.session_state.pinecone_mock = True
-        return None
-        
-def mock_get_embedding(text):
-    """Mocks a 1024-dimension embedding for task text."""
-    # In a real app, use a model like 'BGE-large-en-v1.5' or similar 1024-dim model.
-    np.random.seed(hash(text) % (2**32 - 1)) # Simple way to get repeatable "embeddings"
-    return np.random.rand(VECTOR_DIMENSION).astype('float32').tolist()
+# ==========================================================
+# STEP 2 — ML MODELS
+# ==========================================================
+lin_reg = LinearRegression()
+lin_reg.fit([[0], [100]], [0, 5])
 
-# --- Data Loading and Processing (Pinecone/Mock) ---
-if 'df' not in st.session_state:
+log_reg = LogisticRegression()
+log_reg.fit([[0], [50], [100]], [0, 0, 1])
 
-    @st.cache_data(show_spinner="Loading and processing task vectors from Pinecone/DataFrame...")
-    def load_and_process_data(pinecone_index):
-        """Simulates fetching from Pinecone and applying ML logic."""
-        
-        # 0. Core Data Generation (Used for both Pinecone Upsert and Mock DF)
-        np.random.seed(42)
-        n_tasks = 100
-        
-        data = {
-            'task_id': [f'TASK-{i:03d}' for i in range(1, n_tasks + 1)],
-            'task_name': [f'Project Alpha Task {i}' for i in range(1, n_tasks + 1)],
-            'employee': np.random.choice(['Alice', 'Bob', 'Charlie', 'David', 'Eve', 'Frank'], n_tasks),
-            'department': np.random.choice(['Dev', 'Design', 'Ops', 'HR'], n_tasks),
-            'priority': np.random.choice(['High', 'Medium', 'Low'], n_tasks, p=[0.3, 0.5, 0.2]),
-            'status': np.random.choice(['Pending', 'In-Progress', 'Completed', 'Overdue'], n_tasks, p=[0.25, 0.45, 0.20, 0.10]),
-            'completion%': np.random.uniform(0, 100, n_tasks).round(0),
-            'marks': np.random.uniform(60, 100, n_tasks).round(1),
-            'timestamp': [datetime.now() - timedelta(days=int(np.random.rand() * 60)) for _ in range(n_tasks)],
-            'deadline': [datetime.now() + timedelta(days=int(np.random.rand() * 30 - 15)) for _ in range(n_tasks)],
-            'feedback_text': [np.random.choice(["Great job, highly efficient.", "Needs to improve focus.", "Completed on time.", "Some minor issues, but overall fine.", "Excellent quality work."], 1)[0] for _ in range(n_tasks)],
-            'reviewed': np.random.choice([True, False], n_tasks, p=[0.1, 0.9])
-        }
-        df = pd.DataFrame(data)
+vectorizer = CountVectorizer()
+X_train = vectorizer.fit_transform(["good work", "excellent", "needs improvement", "bad performance"])
+y_train = [1, 1, 0, 0]
+svm_clf = SVC()
+svm_clf.fit(X_train, y_train)
 
-        # Apply data consistency rules
-        df.loc[df['status'] == 'Completed', 'completion%'] = 100
-        df.loc[df['status'] == 'Pending', 'completion%'] = 0
+# ==========================================================
+# STEP 3 — Helper Functions
+# ==========================================================
+def random_vector(dim=dimension):
+    return np.random.rand(dim).tolist()
 
-        # --- Vectorization & Upsert to Pinecone ---
-        if not st.session_state.pinecone_mock:
-            vectors_to_upsert = []
-            for _, row in df.iterrows():
-                task_text = f"{row['task_name']} by {row['employee']} in {row['department']}"
-                vector = mock_get_embedding(task_text)
-                
-                # Metadata (Simplified to ensure no conflicting types)
-                metadata = row.drop(labels=['task_id', 'timestamp', 'deadline']).to_dict()
-                metadata['timestamp'] = row['timestamp'].isoformat()
-                metadata['deadline'] = row['deadline'].isoformat()
-                
-                vectors_to_upsert.append((row['task_id'], vector, metadata))
-            
-            # Upsert in batches
-            try:
-                pinecone_index.upsert(vectors=vectors_to_upsert)
-            except Exception as e:
-                 st.error(f"Pinecone Upsert failed: {e}")
+def safe_metadata(md: dict):
+    clean = {}
+    for k, v in md.items():
+        if isinstance(v, (np.generic,)):
+            v = v.item()
+        clean[k] = v
+    return clean
 
-        # --- ML Logic (Applied to local DF/metadata after fetch) ---
+def assign_task_auto(tasks, employees):
+    workload = {e: 0 for e in employees}
+    assignment = []
+    for task in tasks:
+        emp = min(workload, key=workload.get)
+        task['assigned_to'] = emp
+        workload[emp] += 1
+        assignment.append(task)
+    return assignment
 
-        # 1. Logistic Regression / Random Forest (Status Classification)
-        def mock_status_prediction(row):
-            if row['status'] == 'Completed': return 'On Track', 0.05
-            if row['status'] == 'Overdue': return 'Delayed', np.random.uniform(0.7, 0.99)
-            if row['completion%'] < 50 and row['deadline'] < (datetime.now() + timedelta(days=3)):
-                return 'At Risk', np.random.uniform(0.5, 0.8)
-            return 'On Track', np.random.uniform(0.01, 0.4)
+def cluster_tasks(tasks, n_clusters=3):
+    X = np.array([[t['completion'], t['marks']] for t in tasks])
+    if len(tasks) < n_clusters:
+        n_clusters = len(tasks)
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+    clusters = kmeans.fit_predict(X)
+    for task, cluster in zip(tasks, clusters):
+        task['cluster'] = int(cluster)
+    return tasks
 
-        df[['predicted_status', 'prediction_probability']] = df.apply(
-            lambda row: pd.Series(mock_status_prediction(row)), axis=1
-        )
-
-        # 2. K-Means Clustering (Performance Grouping)
-        perf_data = df.groupby('employee')[['marks', 'completion%']].mean().reset_index()
-        X = perf_data[['marks', 'completion%']].values
-        
-        if len(X) >= 3:
-            kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
-            perf_data['cluster'] = kmeans.fit_predict(X)
-            cluster_means = perf_data.groupby('cluster')['marks'].mean()
-            mapping = {
-                cluster_means.idxmax(): 'High Performers',
-                cluster_means.idxmin(): 'Needs Support',
-                cluster_means.drop([cluster_means.idxmax(), cluster_means.idxmin()]).index[0]: 'Average'
-            }
-            perf_data['performance_group'] = perf_data['cluster'].map(mapping)
-            df = df.merge(perf_data[['employee', 'performance_group']], on='employee', how='left')
+def classify_performance(tasks):
+    perf = {}
+    for task in tasks:
+        emp = task['employee']
+        score = task['marks']
+        if emp not in perf:
+            perf[emp] = []
+        perf[emp].append(score)
+    classification = {}
+    for emp, scores in perf.items():
+        avg = np.mean(scores)
+        if avg >= 4:
+            classification[emp] = "High"
+        elif avg >= 2.5:
+            classification[emp] = "Medium"
         else:
-             df['performance_group'] = np.random.choice(['High Performers', 'Average', 'Needs Support'], n_tasks)
+            classification[emp] = "Low"
+    return classification
 
-        # 3. SVM (Sentiment Analysis - Mock)
-        def mock_sentiment_analysis(text):
-            text_lower = text.lower()
-            if 'great' in text_lower or 'excellent' in text_lower or 'efficient' in text_lower:
-                return 'Positive'
-            if 'improve' in text_lower or 'minor issues' in text_lower or 'poor' in text_lower:
-                return 'Negative'
-            return 'Neutral'
-        
-        df['feedback_sentiment'] = df['feedback_text'].apply(mock_sentiment_analysis)
+# ==========================================================
+# STEP 4 — Streamlit App
+# ==========================================================
+st.title("🤖 EvalTrack — AI-Powered Task Management & Review")
 
-        return df
+role = st.sidebar.selectbox("Login as", ["Team Member", "Manager", "Client"])
 
-    # --- PINE CONE / MOCK INITIALIZATION ---
-    pinecone_index = init_pinecone_connection()
-    st.session_state.df = load_and_process_data(pinecone_index)
-    st.session_state.pinecone_index = pinecone_index
-    
-# Helper function to update the DataFrame and Pinecone (Mock Pinecone Metadata Update)
-def update_task_status(task_id, new_status, reviewed=False):
-    # 1. Update Local Cache (DataFrame)
-    st.session_state.df.loc[st.session_state.df['task_id'] == task_id, 'status'] = new_status
-    if reviewed:
-        st.session_state.df.loc[st.session_state.df['task_id'] == task_id, 'reviewed'] = True
-        
-    # 2. Update Pinecone Metadata
-    if not st.session_state.pinecone_mock and st.session_state.pinecone_index:
-        try:
-            st.session_state.pinecone_index.update(
-                id=task_id,
-                set_metadata={'status': new_status, 'reviewed': reviewed}
+# ==========================================================
+# TEAM MEMBER
+# ==========================================================
+if role == "Team Member":
+    st.header("👩‍💻 Team Member Section")
+    company = st.text_input("🏢 Company Name")
+    employee = st.text_input("👤 Your Name")
+    task = st.text_input("📝 Task Title")
+    completion = st.slider("✅ Completion %", 0, 100, 0)
+
+    if st.button("📩 Submit Task"):
+        if company and employee and task:
+            marks = lin_reg.predict([[completion]])[0]
+            status = log_reg.predict([[completion]])[0]
+            status_text = "On Track" if status == 1 else "Delayed"
+            task_id = str(uuid.uuid4())
+
+            index.upsert(
+                vectors=[{
+                    "id": task_id,
+                    "values": random_vector(),
+                    "metadata": safe_metadata({
+                        "company": company,
+                        "employee": employee,
+                        "task": task,
+                        "completion": float(completion),
+                        "marks": float(marks),
+                        "status": status_text,
+                        "reviewed": False,
+                        "created_at": datetime.now().isoformat()
+                    })
+                }]
             )
-            st.toast(f"Task {task_id} status updated in Pinecone!", icon='💾')
-        except Exception as e:
-            st.error(f"Pinecone update failed for {task_id}: {e}")
-            
-    st.toast(f"Task {task_id} status updated to {new_status}!", icon='✅')
+            st.success(f"✅ Task '{task}' submitted by {employee}")
+        else:
+            st.error("❌ Fill all fields before submitting")
 
-# --- UI/Layout & Custom CSS (Unchanged from previous version for brevity) ---
-st.set_page_config(
-    page_title="Agentic AI & EvalTrack Manager View",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-st.markdown("""<style>...</style>""", unsafe_allow_html=True) # CSS omitted for brevity
-st.title("Agentic AI & EvalTrack Manager View")
-
-# --- Main Tabs Layout ---
-tab_dashboard, tab_task_manager, tab_feedback_ai, tab_admin = st.tabs(
-    ["📊 Dashboard", "📋 Task Manager", "💬 Feedback & AI Insights", "🛠️ Admin Tools"]
-)
-
-with tab_dashboard:
-    st.subheader("Executive View: Real-time Performance & Risk")
-    # ... (Task Summary Panel, AI Alerts, Goal Tracker, Heatmap logic - unchanged) ...
-
-with tab_task_manager:
-    st.subheader("Operational Manager View: Task Creation & Visualization")
-
-    col_create, col_suggest = st.columns([2, 1])
-    
-    with col_create:
-        with st.form("new_task_form"):
-            # ... (Form inputs) ...
-            
-            # Agentic AI Logic - Auto-Suggest Assignment (Mock using Pinecone Query Pattern)
-            available_employees = st.session_state.df['employee'].unique().tolist()
-            workload = st.session_state.df[st.session_state.df['status'] == 'In-Progress'].groupby('employee')['task_id'].count()
-            least_busy_employee = workload.idxmin() if not workload.empty else available_employees[0]
-            
-            # MOCK PINE CONE AGENTIC QUERY
-            if not st.session_state.pinecone_mock and st.session_state.pinecone_index:
-                # 1. Create a "Skill Vector" for the required task
-                required_skill_text = f"{task_name} {task_desc} High Priority"
-                required_skill_vector = mock_get_embedding(required_skill_text)
-                
-                # 2. Query Pinecone for the closest "Employee Skill/Past Task" vectors
-                # (This simulates a vector-based query for optimal assignment)
-                query_results = st.session_state.pinecone_index.query(
-                    vector=required_skill_vector,
-                    top_k=3,
-                    filter={'status': 'Completed'} # Only query vectors of completed tasks (demonstrated skills)
+# ==========================================================
+# CLIENT
+# ==========================================================
+elif role == "Client":
+    st.header("👨‍💼 Client Section")
+    company = st.text_input("🏢 Company Name")
+    if st.button("🔍 View Approved Tasks") and company:
+        res = index.query(
+            vector=random_vector(),
+            top_k=100,
+            include_metadata=True,
+            filter={"company": {"$eq": company}, "reviewed": {"$eq": True}}
+        )
+        if res.matches:
+            st.subheader(f"📌 Approved Tasks for {company}")
+            for match in res.matches:
+                md = match.metadata or {}
+                st.write(
+                    f"👤 {md.get('employee','?')} | **{md.get('task','?')}** → {md.get('completion',0)}% "
+                    f"(Marks: {md.get('marks',0):.2f}) | Status: {md.get('status','?')}"
                 )
-                if query_results.matches:
-                    top_employee_from_vector = query_results.matches[0].metadata['employee']
-                    suggested_employee = f"🤖 Suggested (Vector Search): {top_employee_from_vector}"
-                else:
-                    suggested_employee = f"🤖 Suggested (Workload): {least_busy_employee}"
+                st.write(f"📝 Manager Sentiment: {md.get('sentiment','N/A')}")
+        else:
+            st.warning("⚠️ No approved tasks found.")
+    elif not company:
+        st.error("❌ Enter company name")
+
+# ==========================================================
+# MANAGER
+# ==========================================================
+elif role == "Manager":
+    st.header("🧑‍💼 Manager Review Section")
+    all_res = index.query(vector=random_vector(), top_k=200, include_metadata=True)
+    companies = list(set([m.metadata.get("company","?") for m in all_res.matches])) if all_res.matches else []
+
+    if companies:
+        company = st.selectbox("🏢 Select Company", companies)
+    else:
+        st.warning("⚠️ No companies found.")
+        company = None
+
+    if company:
+        res = index.query(
+            vector=random_vector(),
+            top_k=100,
+            include_metadata=True,
+            include_values=True,
+            filter={"company": {"$eq": company}, "reviewed": {"$eq": False}}
+        )
+
+        pending_tasks = res.matches or []
+        if pending_tasks:
+            st.subheader(f"📌 Pending Tasks for {company}")
+
+            # Auto-assign & clustering
+            employees = list(set([m.metadata.get("employee","?") for m in pending_tasks]))
+            if st.button("🔄 Auto-Assign Tasks"):
+                assigned_tasks = assign_task_auto([m.metadata for m in pending_tasks], employees)
+                for i, match in enumerate(pending_tasks):
+                    match.metadata['assigned_to'] = assigned_tasks[i]['assigned_to']
+                st.success("✅ Tasks auto-assigned based on workload")
+
+            tasks_metadata = [m.metadata for m in pending_tasks]
+            clustered_tasks = cluster_tasks(tasks_metadata)
+            st.subheader("📌 Task Clusters")
+            for t in clustered_tasks:
+                st.write(f"{t.get('task','?')} → Cluster {t.get('cluster','?')} | Completion: {t.get('completion',0)}%")
+
+            st.subheader("📊 Employee Performance")
+            perf = classify_performance([m.metadata for m in pending_tasks])
+            for emp, cat in perf.items():
+                st.write(f"{emp} → {cat} Performer")
+
+            with st.form(key="manager_review_form"):
+                for match in pending_tasks:
+                    md = match.metadata or {}
+                    emp = md.get("employee", "?")
+                    task = md.get("task", "?")
+                    emp_completion = float(md.get("completion", 0))
+                    st.write(f"👤 {emp} | Task: **{task}**")
+                    st.slider(
+                        f"✅ Adjust Completion ({emp} - {task})",
+                        0, 100, int(emp_completion),
+                        key=f"adj_{match.id}"
+                    )
+                    st.text_area(
+                        f"📝 Manager Comments ({emp} - {task})",
+                        key=f"c_{match.id}"
+                    )
+
+                submit = st.form_submit_button("💾 Save All Reviews")
+                if submit:
+                    for match in pending_tasks:
+                        md = match.metadata or {}
+                        manager_completion = st.session_state[f"adj_{match.id}"]
+                        comments = st.session_state[f"c_{match.id}"]
+                        predicted_marks = float(lin_reg.predict([[manager_completion]])[0])
+                        status = log_reg.predict([[manager_completion]])[0]
+                        status_text = "On Track" if status == 1 else "Delayed"
+
+                        sentiment_text = "N/A"
+                        if comments:
+                            try:
+                                X_new = vectorizer.transform([comments])
+                                sentiment = svm_clf.predict(X_new)[0]
+                                sentiment_text = "Positive" if sentiment == 1 else "Negative"
+                            except Exception:
+                                sentiment_text = "N/A"
+
+                        index.upsert(vectors=[{
+                            "id": match.id,
+                            "values": match.values if hasattr(match, "values") else random_vector(),
+                            "metadata": safe_metadata({
+                                **md,
+                                "completion": float(manager_completion),
+                                "marks": predicted_marks,
+                                "status": status_text,
+                                "reviewed": True,
+                                "comments": comments,
+                                "sentiment": sentiment_text
+                            })
+                        }])
+                    st.success("✅ All reviews saved successfully!")
+        else:
+            st.success(f"✅ All tasks for {company} have already been reviewed!")
+
+# ==========================================================
+# STEP 5 — Advanced Tabs (Dashboard, Alerts, Analytics, etc.)
+# ==========================================================
+st.markdown("---")
+st.header("✨ Extended EvalTrack Features")
+
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "📈 Dashboard", "🔔 Alerts", "📊 Analytics",
+    "📁 Export", "🔎 Search & Approve", "🧭 Skill Suggestions"
+])
+
+# ---------- TAB 1: Dashboard ----------
+with tab1:
+    st.subheader("Project Dashboard Overview")
+    try:
+        qres = index.query(vector=random_vector(), top_k=1000, include_metadata=True)
+        matches = qres.matches or []
+    except Exception as e:
+        st.error(f"Error querying Pinecone: {e}")
+        matches = []
+
+    df_rows = []
+    for m in matches:
+        md = m.metadata or {}
+        df_rows.append({
+            "id": m.id,
+            "company": md.get("company"),
+            "employee": md.get("employee"),
+            "task": md.get("task"),
+            "completion": float(md.get("completion", 0)),
+            "marks": float(md.get("marks", 0)),
+            "status": md.get("status"),
+            "reviewed": md.get("reviewed", False),
+            "cluster": md.get("cluster", None),
+            "sentiment": md.get("sentiment", None)
+        })
+    df = pd.DataFrame(df_rows)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("🔢 Total Tasks", len(df))
+    c2.metric("✅ Reviewed", int(df['reviewed'].sum()) if not df.empty else 0)
+    c3.metric("👥 Employees", int(df['employee'].nunique()) if not df.empty else 0)
+    c4.metric("🏢 Companies", int(df['company'].nunique()) if not df.empty else 0)
+
+    if not df.empty:
+        st.markdown("**Top Performers**")
+        top_perf = df.groupby("employee")["marks"].mean().sort_values(ascending=False).head(10)
+        st.table(top_perf.reset_index())
+        fig, ax = plt.subplots()
+        ax.hist(df["completion"].fillna(0), bins=10)
+        ax.set_xlabel("Completion %")
+        ax.set_ylabel("Count")
+        st.pyplot(fig)
+
+# ---------- TAB 2: Alerts ----------
+with tab2:
+    st.subheader("AI Alerts")
+    thresh = st.slider("Alert if completion below (%)", 0, 100, 40)
+    overdue_days = st.number_input("Overdue days (unreviewed)", 0, 90, 7)
+    alerts = []
+    for m in matches:
+        md = m.metadata or {}
+        comp = float(md.get("completion", 0))
+        if comp < thresh:
+            alerts.append(f"{md.get('employee')} | {md.get('task')} ({comp}%) - Low Completion")
+    st.write(f"Found {len(alerts)} alerts")
+    for a in alerts:
+        st.warning(a)
+
+# ---------- TAB 3: Analytics ----------
+with tab3:
+    st.subheader("Analytics & Trends")
+    if not df.empty:
+        if "cluster" in df.columns and df["cluster"].notnull().any():
+            cluster_counts = df["cluster"].fillna(-1).astype(int).value_counts()
+            st.bar_chart(cluster_counts)
+        sent_counts = df["sentiment"].fillna("N/A").value_counts()
+        st.table(sent_counts)
+
+# ---------- TAB 4: Export ----------
+with tab4:
+    if not df.empty:
+        csv_bytes = df.to_csv(index=False).encode()
+        st.download_button("⬇️ Export CSV", csv_bytes, "tasks_export.csv", "text/csv")
+
+# ---------- TAB 5: Search & Approve ----------
+with tab5:
+    st.subheader("Search & Approve Tasks")
+    q_company = st.text_input("Company Filter")
+    filter_dict = {}
+    if q_company:
+        filter_dict["company"] = {"$eq": q_company}
+    res = index.query(vector=random_vector(), top_k=200, include_metadata=True, filter=filter_dict or None)
+    for m in res.matches:
+        md = m.metadata or {}
+        cols = st.columns([3, 1, 1])
+        cols[0].write(f"{md.get('task')} ({md.get('employee')})")
+        cols[1].write(f"{md.get('completion')}%")
+        if cols[2].button("Approve", key=f"a{m.id[:6]}"):
+            md["reviewed"] = True
+            index.upsert([{"id": m.id, "values": m.values if hasattr(m, "values") else random_vector(), "metadata": safe_metadata(md)}])
+            st.success(f"Approved {md.get('task')}")
+
+# ---------- TAB 6: Skill Suggestions ----------
+with tab6:
+    st.subheader("Employee Skill Suggestions")
+    sugg_emp = st.text_input("Employee name")
+    if st.button("Suggest"):
+        emp_rows = df[df["employee"] == sugg_emp]
+        if emp_rows.empty:
+            st.info("No records found.")
+        else:
+            avg_marks = emp_rows["marks"].mean()
+            avg_comp = emp_rows["completion"].mean()
+            st.write(f"Average Marks: {avg_marks:.2f}, Completion: {avg_comp:.1f}%")
+            sugg = []
+            if avg_marks < 2.5:
+                sugg += ["Core skill training", "1:1 Mentorship"]
+            elif avg_marks < 4:
+                sugg += ["Short upskilling course"]
             else:
-                 suggested_employee = f"🤖 Suggested (Workload): {least_busy_employee} (Workload: {workload.min() if not workload.empty else 0})"
-            
-            selected_employee = st.selectbox(
-                "Assign To", 
-                options=available_employees, 
-                help=suggested_employee
-            )
-            
-            # ... (Other form fields) ...
-            submitted = st.form_submit_button("Create Task")
-            
-            if submitted:
-                # ... (New task creation logic) ...
-                new_task_id = f"TASK-{len(st.session_state.df) + 1:03d}"
-                new_row = pd.DataFrame([{...}]) # Create new DF row
-                st.session_state.df = pd.concat([st.session_state.df, new_row], ignore_index=True)
-                
-                # PINE CONE UPSERT FOR NEW TASK
-                if not st.session_state.pinecone_mock and st.session_state.pinecone_index:
-                    new_task_text = f"{task_name} by {selected_employee}"
-                    new_vector = mock_get_embedding(new_task_text)
-                    
-                    # Prepare metadata (ensure all ML outputs are saved back as metadata)
-                    new_metadata = new_row.iloc[0].drop(labels=['task_id', 'timestamp', 'deadline']).to_dict()
-                    new_metadata['timestamp'] = new_row['timestamp'].iloc[0].isoformat()
-                    new_metadata['deadline'] = new_row['deadline'].iloc[0].isoformat()
-                    
-                    try:
-                        st.session_state.pinecone_index.upsert(vectors=[
-                            (new_task_id, new_vector, new_metadata)
-                        ])
-                        st.success(f"Task vector {new_task_id} upserted to Pinecone.")
-                    except Exception as e:
-                        st.error(f"Pinecone Upsert for new task failed: {e}")
-                
-                st.success(f"Task '{task_name}' created and assigned to {selected_employee}!")
-    
-    # ... (Predictive Deadlines and Task Visualizations - unchanged) ...
-
-with tab_feedback_ai:
-    # ... (Feedback Input and Sentiment Analysis - unchanged) ...
-    # Note: Saving feedback also involves an update_task_status/index.update call
-    # which is handled by a similar pattern to the one in tab_admin.
-    pass
-
-with tab_admin:
-    st.subheader("Managerial Actions & Appraisal Tools")
-
-    # --- 7. Managerial Actions & Approvals ---
-    # ... (Task selection logic - unchanged) ...
-    
-    # The action buttons call the Pinecone-integrated helper:
-    # update_task_status(task_to_act, 'Completed', reviewed=True) 
-
-    # ... (Rest of the Appraisal Card logic - unchanged) ...
+                sugg += ["Leadership Program"]
+            if avg_comp < 60:
+                sugg += ["Time management session"]
+            st.write("Suggestions:")
+            for s in sugg:
+                st.write("-", s)
