@@ -1,6 +1,4 @@
-# ------------------------------
-# Command: streamlit run app.py
-# ------------------------------
+# Use command streamlit run app.py
 import streamlit as st
 from pinecone import Pinecone, ServerlessSpec
 import numpy as np
@@ -9,7 +7,6 @@ from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.svm import SVC
 from sklearn.cluster import KMeans
-import pandas as pd
 
 # ------------------------------
 # Step 1: Initialize Pinecone DB
@@ -96,19 +93,19 @@ def classify_performance(tasks):
             classification[emp] = "Low"
     return classification
 
+
 # ------------------------------
-# Step 4: Streamlit UI
+# Step 4: Streamlit App
 # ------------------------------
-st.set_page_config(page_title="AI Task & Performance Hub", layout="wide")
-st.title("💼 AI-Driven Employee Performance & Task Management Suite")
+st.title("📊 AI-Powered Task Completion & Review")
 
 role = st.sidebar.selectbox("Login as", ["Team Member", "Manager", "Client"])
 
 # ------------------------------
-# TEAM MEMBER
+# Team Member Section
 # ------------------------------
 if role == "Team Member":
-    st.header("👩‍💻 Team Member Portal")
+    st.header("👩‍💻 Team Member Section")
     company = st.text_input("🏢 Company Name")
     employee = st.text_input("👤 Your Name")
     task = st.text_input("📝 Task Title")
@@ -121,28 +118,30 @@ if role == "Team Member":
             status_text = "On Track" if status == 1 else "Delayed"
             task_id = str(uuid.uuid4())
 
-            index.upsert(vectors=[{
-                "id": task_id,
-                "values": random_vector(),
-                "metadata": safe_metadata({
-                    "company": company,
-                    "employee": employee,
-                    "task": task,
-                    "completion": float(completion),
-                    "marks": float(marks),
-                    "status": status_text,
-                    "reviewed": False
-                })
-            }])
+            index.upsert(
+                vectors=[{
+                    "id": task_id,
+                    "values": random_vector(),
+                    "metadata": safe_metadata({
+                        "company": company,
+                        "employee": employee,
+                        "task": task,
+                        "completion": float(completion),
+                        "marks": float(marks),
+                        "status": status_text,
+                        "reviewed": False
+                    })
+                }]
+            )
             st.success(f"✅ Task '{task}' submitted by {employee}")
         else:
             st.error("❌ Fill all fields before submitting")
 
 # ------------------------------
-# CLIENT VIEW
+# Client Section
 # ------------------------------
 elif role == "Client":
-    st.header("👨‍💼 Client Review Portal")
+    st.header("👨‍💼 Client Section")
     company = st.text_input("🏢 Company Name")
     if st.button("🔍 View Approved Tasks") and company:
         res = index.query(
@@ -157,83 +156,111 @@ elif role == "Client":
                 md = match.metadata or {}
                 st.write(
                     f"👤 {md.get('employee','?')} | **{md.get('task','?')}** → {md.get('completion',0)}% "
-                    f"(Marks: {md.get('marks',0):.2f}) | Status: {md.get('status','?')} | Sentiment: {md.get('sentiment','N/A')}"
+                    f"(Marks: {md.get('marks',0):.2f}) | Status: {md.get('status','?')}"
                 )
+                st.write(f"📝 Manager Sentiment: {md.get('sentiment','N/A')}")
         else:
             st.warning("⚠️ No approved tasks found.")
+    elif not company:
+        st.error("❌ Enter company name")
 
 # ------------------------------
-# MANAGER DASHBOARD (Merged)
+# Manager Section
 # ------------------------------
 elif role == "Manager":
-    st.header("🧭 Unified Manager Dashboard")
-    st.markdown("Monitor, Manage, and Motivate — All in One Pane")
+    st.header("🧑‍💼 Manager Review Section")
+    all_res = index.query(vector=random_vector(), top_k=100, include_metadata=True)
+    companies = list(set([m.metadata.get("company","?") for m in all_res.matches])) if all_res.matches else []
 
-    # Fetch all task data
-    all_res = index.query(vector=random_vector(), top_k=200, include_metadata=True)
-    tasks = [m.metadata for m in all_res.matches] if all_res.matches else []
-    if not tasks:
-        st.warning("⚠️ No task data available yet.")
+    if companies:
+        company = st.selectbox("🏢 Select Company", companies)
     else:
-        df = pd.DataFrame(tasks)
-        if 'employee' in df.columns:
-            # Task Summary
-            st.subheader("📊 Task Summary")
-            total = len(df)
-            reviewed = len(df[df["reviewed"] == True])
-            pending = total - reviewed
-            on_track = len(df[df["status"] == "On Track"])
-            delayed = len(df[df["status"] == "Delayed"])
-            st.write(f"✅ Total Tasks: {total} | 🕒 Pending: {pending} | 🚀 On Track: {on_track} | ⚠️ Delayed: {delayed}")
+        st.warning("⚠️ No companies found.")
+        company = None
 
-            # Team Performance Heatmap
-            st.subheader("🔥 Team Performance Heatmap")
-            perf = classify_performance(tasks)
-            perf_df = pd.DataFrame(list(perf.items()), columns=["Employee", "Category"])
-            st.dataframe(perf_df)
+    if company:
+        res = index.query(
+            vector=random_vector(),
+            top_k=100,
+            include_metadata=True,
+            include_values=True,
+            filter={"company": {"$eq": company}, "reviewed": {"$eq": False}}
+        )
 
-            # AI Alerts
-            st.subheader("⚡ AI Alerts")
-            alerts = []
-            if delayed > (total * 0.4):
-                alerts.append("High number of delayed tasks! Review workload distribution.")
-            if len(set(df['employee'])) < 2:
-                alerts.append("Single contributor alert! Possible workload imbalance.")
-            if not alerts:
-                st.success("✅ No major alerts detected.")
-            else:
-                for a in alerts:
-                    st.warning(a)
+        pending_tasks = res.matches or []
+        if pending_tasks:
+            st.subheader(f"📌 Pending Tasks for {company}")
 
-            # Goal Tracker
-            st.subheader("🎯 Goal Tracker")
-            goal = st.slider("Set Monthly Target (in %)", 50, 100, 80)
-            avg_completion = df["completion"].mean()
-            st.progress(int(avg_completion))
-            st.write(f"📈 Current Average: {avg_completion:.2f}% of Target {goal}%")
+            # Auto-assign & clustering
+            employees = list(set([m.metadata.get("employee","?") for m in pending_tasks]))
+            if st.button("🔄 Auto-Assign Tasks"):
+                assigned_tasks = assign_task_auto([m.metadata for m in pending_tasks], employees)
+                for i, match in enumerate(pending_tasks):
+                    match.metadata['assigned_to'] = assigned_tasks[i]['assigned_to']
+                st.success("✅ Tasks auto-assigned based on workload")
 
-            # 360° Feedback Section
-            st.subheader("💬 360° Feedback & Sentiment")
-            feedback = st.text_area("Enter employee feedback (self/peer/manager):")
-            if st.button("🔍 Analyze Feedback"):
-                if feedback.strip():
-                    X_new = vectorizer.transform([feedback])
-                    sentiment = svm_clf.predict(X_new)[0]
-                    result = "Positive" if sentiment == 1 else "Negative"
-                    st.write(f"🧠 AI Sentiment: **{result}**")
-                else:
-                    st.error("Enter feedback first.")
+            tasks_metadata = [m.metadata for m in pending_tasks]
+            clustered_tasks = cluster_tasks(tasks_metadata)
+            st.subheader("📌 Task Clusters")
+            for t in clustered_tasks:
+                st.write(f"{t.get('task','?')} → Cluster {t.get('cluster','?')} | Completion: {t.get('completion',0)}%")
 
-            # Managerial Actions
-            st.subheader("⚙️ Managerial Actions & Approvals")
-            st.write("Quick Actions for performance and task control.")
-            act = st.selectbox("Choose Action", [
-                "Reassign Tasks", "Approve Deliverables", "Send Appreciation", "Issue Warning"
-            ])
-            emp = st.selectbox("Select Employee", list(set(df["employee"].dropna())))
-            msg = st.text_input("Message or Note")
+            st.subheader("📊 Employee Performance")
+            perf = classify_performance([m.metadata for m in pending_tasks])
+            for emp, cat in perf.items():
+                st.write(f"{emp} → {cat} Performer")
 
-            if st.button("🚀 Execute Action"):
-                st.success(f"✅ Action '{act}' executed for {emp}. Message: {msg or 'N/A'}")
+            # Form to prevent refresh
+            with st.form(key="manager_review_form"):
+                for match in pending_tasks:
+                    md = match.metadata or {}
+                    emp = md.get("employee", "?")
+                    task = md.get("task", "?")
+                    emp_completion = float(md.get("completion", 0))
+                    st.write(f"👤 {emp} | Task: **{task}**")
+                    st.slider(
+                        f"✅ Adjust Completion ({emp} - {task})",
+                        0, 100, int(emp_completion),
+                        key=f"adj_{match.id}"
+                    )
+                    st.text_area(
+                        f"📝 Manager Comments ({emp} - {task})",
+                        key=f"c_{match.id}"
+                    )
 
-            st.success("Managerial Dashboard Updated ✅")
+                submit = st.form_submit_button("💾 Save All Reviews")
+                if submit:
+                    for match in pending_tasks:
+                        md = match.metadata or {}
+                        manager_completion = st.session_state[f"adj_{match.id}"]
+                        comments = st.session_state[f"c_{match.id}"]
+                        predicted_marks = float(lin_reg.predict([[manager_completion]])[0])
+                        status = log_reg.predict([[manager_completion]])[0]
+                        status_text = "On Track" if status == 1 else "Delayed"
+
+                        sentiment_text = "N/A"
+                        if comments:
+                            try:
+                                X_new = vectorizer.transform([comments])
+                                sentiment = svm_clf.predict(X_new)[0]
+                                sentiment_text = "Positive" if sentiment == 1 else "Negative"
+                            except Exception:
+                                sentiment_text = "N/A"
+
+                        # Update Pinecone
+                        index.upsert(vectors=[{
+                            "id": match.id,
+                            "values": match.values if hasattr(match, "values") else random_vector(),
+                            "metadata": safe_metadata({
+                                **md,
+                                "completion": float(manager_completion),
+                                "marks": predicted_marks,
+                                "status": status_text,
+                                "reviewed": True,
+                                "comments": comments,
+                                "sentiment": sentiment_text
+                            })
+                        }])
+                    st.success("✅ All reviews saved successfully!")
+        else:
+            st.success(f"✅ All tasks for {company} have already been reviewed!")
