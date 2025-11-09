@@ -1,4 +1,6 @@
 # main.py — AI Workforce Intelligence Platform (Enterprise Edition)
+# Author: Streamlined version with Leave Management + Client Review Locking
+# Dependencies: streamlit, pinecone-client, pandas, scikit-learn, plotly, huggingface-hub
 
 import streamlit as st
 from pinecone import Pinecone, ServerlessSpec
@@ -94,7 +96,9 @@ def fetch_all():
         st.warning(f"Fetch error: {e}")
         return pd.DataFrame()
 
-# ML model for performance mapping
+# ---------------------------------------------------------
+# MODELS
+# ---------------------------------------------------------
 lin_reg = LinearRegression().fit([[0], [50], [100]], [0, 2.5, 5])
 
 # ---------------------------------------------------------
@@ -108,7 +112,7 @@ current_month = datetime.now().strftime("%B %Y")
 # ---------------------------------------------------------
 if role == "Manager":
     st.header("Manager Dashboard")
-    tabs = st.tabs(["Task Management", "AI Insights", "Meetings & Feedback", "Leave Management", "360 Overview"])
+    tabs = st.tabs(["Task Management", "AI Insights", "Leave Approvals", "360 Overview"])
 
     # --- Task Management ---
     with tabs[0]:
@@ -163,17 +167,14 @@ if role == "Manager":
 
     # --- AI Insights ---
     with tabs[1]:
-        st.subheader("AI Insights & Analytics Center")
+        st.subheader("AI Insights & Analytics")
         df = fetch_all()
         if df.empty:
             st.info("No data available.")
         else:
             df["completion"] = pd.to_numeric(df["completion"], errors="coerce").fillna(0)
             st.metric("Average Completion", f"{df['completion'].mean():.1f}%")
-            st.metric("Total Tasks", len(df))
-            st.metric("Active Employees", df["employee"].nunique())
-
-            query = st.text_input("Ask AI for insights (e.g. 'Who is underperforming this month?')")
+            query = st.text_input("Ask AI (e.g. 'Who is underperforming this month?')")
             if st.button("Analyze"):
                 if HF_TOKEN:
                     client = InferenceClient(token=HF_TOKEN)
@@ -186,33 +187,29 @@ if role == "Manager":
                 else:
                     st.warning("Hugging Face API key missing.")
 
-    # --- Meetings ---
+    # --- Leave Approvals ---
     with tabs[2]:
-        st.subheader("Meeting Notes & Feedback")
-        title = st.text_input("Meeting Title")
-        notes = st.text_area("Summary")
-        date_val = st.date_input("Meeting Date", value=date.today())
-        if st.button("Save Meeting"):
-            mid = str(uuid.uuid4())
-            upsert_data(mid, {"meeting": title, "notes": notes, "date": str(date_val), "created": now()})
-            st.success("Meeting saved successfully.")
+        st.subheader("Leave Approvals")
+        df = fetch_all()
+        leaves = df[df["status"].isin(["Pending", "Approved", "Rejected"])] if not df.empty else pd.DataFrame()
 
-    # --- Leave Management ---
-    with tabs[3]:
-        st.subheader("Leave Requests")
-        emp = st.text_input("Employee")
-        typ = st.selectbox("Type", ["Casual", "Sick", "Earned"])
-        f = st.date_input("From")
-        t = st.date_input("To")
-        reason = st.text_area("Reason")
-        if st.button("Submit Leave"):
-            lid = str(uuid.uuid4())
-            md = {"employee": emp, "type": typ, "from": str(f), "to": str(t), "reason": reason, "status": "Pending", "submitted": now()}
-            upsert_data(lid, md)
-            st.success("Leave request submitted.")
+        if leaves.empty:
+            st.info("No leave requests.")
+        else:
+            for _, r in leaves.iterrows():
+                if r["status"] == "Pending":
+                    st.markdown(f"**{r['employee']}** requested **{r['type']} leave** ({r['from']} → {r['to']})")
+                    st.write(f"Reason: {r.get('reason', '-')}")
+                    decision = st.radio(f"Approve {r['employee']}'s leave?", ["Approve", "Reject"], key=r["_id"])
+                    if st.button(f"Finalize Decision for {r['employee']}", key=f"lv_{r['_id']}"):
+                        r["status"] = "Approved" if decision == "Approve" else "Rejected"
+                        r["approved_by"] = "Manager"
+                        r["approved_on"] = now()
+                        upsert_data(r["_id"], r)
+                        st.success(f"Leave {r['status']} for {r['employee']}")
 
     # --- 360 Overview ---
-    with tabs[4]:
+    with tabs[3]:
         st.subheader("Employee Performance Overview")
         df = fetch_all()
         if df.empty:
@@ -224,10 +221,10 @@ if role == "Manager":
             st.metric("Avg Completion", f"{emp_df['completion'].mean():.1f}%")
 
 # ---------------------------------------------------------
-# TEAM MEMBER DASHBOARD (WITH FEEDBACK INSIGHTS)
+# TEAM MEMBER DASHBOARD
 # ---------------------------------------------------------
 elif role == "Team Member":
-    st.header("Team Member Portal")
+    st.header("Team Member Dashboard")
 
     name = st.text_input("Enter your name")
     if name:
@@ -248,70 +245,53 @@ elif role == "Team Member":
                     upsert_data(r.get("_id") or str(uuid.uuid4()), r)
                     st.success(f"Task '{r.get('task')}' updated successfully.")
 
-            # -------------------------
-            # FEEDBACK INSIGHT SECTION
-            # -------------------------
-            st.markdown("---")
-            st.subheader("Feedback & AI Insights")
-
-            fb_df = my[my[["client_feedback", "manager_comments"]].notna().any(axis=1)].copy()
-
-            if fb_df.empty:
-                st.info("No feedback received yet.")
-            else:
-                fb_df["feedback_text"] = fb_df.apply(
-                    lambda x: x.get("client_feedback") or x.get("manager_comments") or "",
-                    axis=1,
-                )
-                fb_df["source"] = fb_df.apply(
-                    lambda x: "Client" if pd.notna(x.get("client_feedback")) else "Manager",
-                    axis=1,
-                )
-
-                st.dataframe(fb_df[["task", "source", "feedback_text"]], use_container_width=True)
-
-                if HF_TOKEN:
-                    try:
-                        client = InferenceClient(token=HF_TOKEN)
-                        all_feedback = "\n".join(fb_df["feedback_text"].dropna().tolist())
-                        if all_feedback.strip():
-                            st.markdown("### AI Sentiment Overview")
-                            prompt = f"Analyze these feedbacks for sentiment (Positive/Neutral/Negative) and summarize strengths & improvement points:\n\n{all_feedback}"
-                            res = client.text_generation(model="mistralai/Mixtral-8x7B-Instruct", prompt=prompt, max_new_tokens=250)
-                            out = res.get("generated_text") if isinstance(res, dict) else str(res)
-                            st.success("AI Insight Summary:")
-                            st.write(out)
-                    except Exception as e:
-                        st.warning(f"AI analysis unavailable ({e})")
-                else:
-                    st.warning("Hugging Face API key missing for AI insights.")
+        # Leave request
+        st.markdown("---")
+        st.subheader("Leave Request")
+        typ = st.selectbox("Leave Type", ["Casual", "Sick", "Earned"])
+        f = st.date_input("From")
+        t = st.date_input("To")
+        reason = st.text_area("Reason")
+        if st.button("Submit Leave Request"):
+            lid = str(uuid.uuid4())
+            md = {"employee": name, "type": typ, "from": str(f), "to": str(t), "reason": reason, "status": "Pending", "submitted": now()}
+            upsert_data(lid, md)
+            st.success("Leave submitted successfully.")
 
 # ---------------------------------------------------------
 # CLIENT DASHBOARD
 # ---------------------------------------------------------
 elif role == "Client":
-    st.header("Client Review & Insight Center")
-    company = st.text_input("Enter Company Name")
+    st.header("Client Review Center")
+
+    company = st.text_input("Company Name")
     if company:
         df = fetch_all()
         df_client = df[df["company"].str.lower() == company.lower()] if not df.empty else pd.DataFrame()
+
         if df_client.empty:
             st.info("No data found.")
         else:
-            avg_completion = df_client["completion"].mean()
-            avg_marks = df_client["marks"].mean()
-            st.metric("Avg Completion", f"{avg_completion:.1f}%")
-            st.metric("Avg Rating", f"{avg_marks:.2f}")
-            st.dataframe(df_client[["task", "employee", "completion", "status"]])
+            st.subheader("Pending Reviews")
+            unreviewed = df_client[df_client["client_reviewed"] != True]
+            reviewed = df_client[df_client["client_reviewed"] == True]
 
-            task_sel = st.selectbox("Task", df_client["task"].unique())
-            fb = st.text_area("Feedback")
-            rating = st.slider("Rating (1–5)", 1, 5, 3)
-            if st.button("Submit Feedback"):
-                row = df_client[df_client["task"] == task_sel].iloc[0].to_dict()
-                row.update({"client_feedback": fb, "client_rating": rating, "client_reviewed": True})
-                upsert_data(row.get("_id") or str(uuid.uuid4()), row)
-                st.success("Feedback submitted.")
+            if not unreviewed.empty:
+                task_sel = st.selectbox("Select Task to Review", unreviewed["task"].unique())
+                fb = st.text_area("Feedback")
+                rating = st.slider("Rating (1–5)", 1, 5, 3)
+                if st.button("Submit Feedback"):
+                    row = unreviewed[unreviewed["task"] == task_sel].iloc[0].to_dict()
+                    row.update({"client_feedback": fb, "client_rating": rating, "client_reviewed": True, "client_approved_on": now()})
+                    upsert_data(row.get("_id") or str(uuid.uuid4()), row)
+                    st.success("Feedback submitted successfully.")
+
+            st.markdown("---")
+            st.subheader("Reviewed Tasks")
+            if not reviewed.empty:
+                st.dataframe(reviewed[["task", "employee", "client_feedback", "client_rating", "client_approved_on"]])
+            else:
+                st.info("No reviewed tasks yet.")
 
 # ---------------------------------------------------------
 # ADMIN DASHBOARD
@@ -322,13 +302,20 @@ elif role == "Admin":
     if df.empty:
         st.info("No data available.")
     else:
+        for col in ["employee", "department", "task", "completion", "marks"]:
+            if col not in df.columns:
+                df[col] = ""
+
         df["completion"] = pd.to_numeric(df["completion"], errors="coerce").fillna(0)
         df["marks"] = pd.to_numeric(df["marks"], errors="coerce").fillna(0)
 
         st.subheader("Performance Summary")
-        st.dataframe(df[["employee", "department", "task", "completion", "marks"]])
+        st.dataframe(df[["employee", "department", "task", "completion", "marks"]], use_container_width=True)
+
         avg_c = df["completion"].mean()
-        st.metric("Average Completion", f"{avg_c:.1f}%")
+        avg_m = df["marks"].mean()
+        st.metric("Avg Completion", f"{avg_c:.1f}%")
+        st.metric("Avg Marks", f"{avg_m:.2f}")
 
         if len(df) > 2:
             df["risk"] = (100 - df["completion"]) / 100 + (2 - df["marks"]) / 5
