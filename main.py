@@ -4,6 +4,7 @@
 
 import streamlit as st
 from pinecone import Pinecone, ServerlessSpec
+import plotly.express as px
 import numpy as np
 import pandas as pd
 import uuid
