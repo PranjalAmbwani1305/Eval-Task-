@@ -1,6 +1,4 @@
-# main.py — AI Workforce Intelligence Platform (Enterprise Edition)
-# Author: Refined for professional EY-tier structure
-# Dependencies: streamlit, pinecone-client, pandas, scikit-learn, plotly, huggingface-hub
+# main.py — AI Workforce Intelligence Platform (Final Stable Enterprise Build)
 
 import streamlit as st
 from pinecone import Pinecone, ServerlessSpec
@@ -10,11 +8,11 @@ import uuid, json, time
 from datetime import datetime, date
 from sklearn.linear_model import LinearRegression
 from sklearn.cluster import KMeans
-from huggingface_hub import InferenceClient
 import plotly.express as px
+from huggingface_hub import InferenceClient
 
 # ---------------------------------------------------------
-# CONFIG
+# APP CONFIG
 # ---------------------------------------------------------
 st.set_page_config(page_title="AI Workforce Intelligence Platform", layout="wide")
 st.title("AI Workforce Intelligence Platform")
@@ -24,35 +22,28 @@ st.title("AI Workforce Intelligence Platform")
 # ---------------------------------------------------------
 PINECONE_API_KEY = st.secrets.get("PINECONE_API_KEY", "")
 HF_TOKEN = st.secrets.get("HUGGINGFACEHUB_API_TOKEN", "")
-
 INDEX_NAME = "task"
 DIMENSION = 1024
 
-pc = None
-index = None
+pc, index = None, None
 if PINECONE_API_KEY:
     try:
         pc = Pinecone(api_key=PINECONE_API_KEY)
-        existing = [i["name"] for i in pc.list_indexes()]
-        if INDEX_NAME not in existing:
+        if INDEX_NAME not in [i["name"] for i in pc.list_indexes()]:
             pc.create_index(
                 name=INDEX_NAME,
                 dimension=DIMENSION,
                 metric="cosine",
                 spec=ServerlessSpec(cloud="aws", region="us-east-1"),
             )
-            with st.spinner("Creating Pinecone index..."):
-                while True:
-                    desc = pc.describe_index(INDEX_NAME)
-                    if desc["status"].get("ready"):
-                        break
-                    time.sleep(2)
+            while not pc.describe_index(INDEX_NAME)["status"].get("ready"):
+                time.sleep(2)
         index = pc.Index(INDEX_NAME)
         st.caption(f"Connected to Pinecone index: {INDEX_NAME}")
     except Exception as e:
-        st.warning(f"Pinecone init failed; running local only. ({e})")
+        st.warning(f"Pinecone init failed; local mode ({e})")
 else:
-    st.warning("Pinecone API key missing — running local only.")
+    st.warning("Pinecone API key not found — running in local mode")
 
 # ---------------------------------------------------------
 # HELPERS
@@ -102,176 +93,181 @@ lin_reg = LinearRegression().fit([[0], [50], [100]], [0, 2.5, 5])
 # ---------------------------------------------------------
 # ROLE SELECTION
 # ---------------------------------------------------------
-role = st.sidebar.selectbox("Login as", ["Manager", "Team Member", "Client", "Admin"])
+role = st.sidebar.selectbox("Login as", ["Manager", "Team Member", "Client", "HR"])
+
+# ---------------------------------------------------------
+# MANAGER DASHBOARD
+# ---------------------------------------------------------
+if role == "Manager":
+    st.header("Manager Command Center")
+
+    df = fetch_all()
+    tab1, tab2 = st.tabs(["Assign / Reassign Tasks", "Team Overview"])
+
+    with tab1:
+        st.subheader("Assign or Reassign Task")
+        with st.form("assign_task"):
+            company = st.text_input("Company")
+            department = st.text_input("Department")
+            employee = st.text_input("Employee Name")
+            task = st.text_input("Task Title")
+            desc = st.text_area("Task Description")
+            deadline = st.date_input("Deadline", value=date.today())
+            submit = st.form_submit_button("Assign Task")
+
+            if submit and all([employee, task]):
+                tid = str(uuid.uuid4())
+                md = {
+                    "company": company, "department": department,
+                    "employee": employee, "task": task, "description": desc,
+                    "deadline": deadline.isoformat(), "completion": 0,
+                    "marks": 0, "status": "Assigned", "type": "Task", "created": now()
+                }
+                upsert_data(tid, md)
+                st.success(f"Task '{task}' assigned to {employee}")
+
+        if not df.empty:
+            task_sel = st.selectbox("Select Task to Reassign", df["task"].dropna().unique())
+            new_emp = st.text_input("Reassign to Employee")
+            reason = st.text_area("Reason for Reassignment")
+            if st.button("Reassign"):
+                record = df[df["task"] == task_sel].iloc[0].to_dict()
+                record.update({"employee": new_emp, "status": "Reassigned", "reason": reason, "reassigned": now()})
+                upsert_data(record.get("_id") or str(uuid.uuid4()), record)
+                st.success(f"Task '{task_sel}' reassigned to {new_emp}")
+
+    with tab2:
+        st.subheader("Team Task Overview")
+        if df.empty:
+            st.info("No team data yet.")
+        else:
+            df["completion"] = pd.to_numeric(df["completion"], errors="coerce").fillna(0)
+            st.dataframe(df[["employee", "task", "completion", "status", "department"]])
+            fig = px.bar(df, x="employee", y="completion", color="status", title="Team Task Completion Overview")
+            st.plotly_chart(fig, use_container_width=True)
 
 # ---------------------------------------------------------
 # TEAM MEMBER DASHBOARD
 # ---------------------------------------------------------
-if role == "Team Member":
+elif role == "Team Member":
     st.header("Team Member Dashboard")
     name = st.text_input("Enter your name")
 
     if name:
         df = fetch_all()
         if df.empty:
-            st.info("No data found.")
+            st.info("No data available.")
         else:
-            df["type_flag"] = df.apply(
-                lambda x: "Leave" if "type" in x and x["type"] in ["Casual", "Sick", "Earned"] else "Task", axis=1
-            )
-            my_tasks = df[(df["employee"].str.lower() == name.lower()) & (df["type_flag"] == "Task")]
-            my_leaves = df[(df["employee"].str.lower() == name.lower()) & (df["type_flag"] == "Leave")]
+            # Ensure missing fields handled
+            df["type"] = df.get("type", "Task")
+            my_tasks = df[(df["employee"].str.lower() == name.lower()) & (df["type"] == "Task")]
+            my_leaves = df[(df["employee"].str.lower() == name.lower()) & (df["type"].isin(["Casual", "Sick", "Earned"]))]
 
             tab1, tab2 = st.tabs(["My Tasks", "Leave Management"])
 
-            # ---- TAB 1: MY TASKS ----
             with tab1:
-                st.subheader("My Tasks")
                 if my_tasks.empty:
                     st.info("No tasks assigned yet.")
                 else:
-                    my_tasks["completion"] = pd.to_numeric(my_tasks.get("completion", 0), errors="coerce").fillna(0)
                     for _, r in my_tasks.iterrows():
-                        task_title = r.get("task", "Untitled Task")
-                        status = r.get("status", "Not Started")
-                        completion = int(r.get("completion", 0))
-                        st.markdown(f"**Task:** {task_title} | **Status:** {status}")
-                        comp = st.slider("Completion %", 0, 100, completion, key=r.get("_id"))
-                        if st.button(f"Update {task_title}", key=f"upd_{r.get('_id')}"):
+                        st.markdown(f"### {r.get('task')} — {r.get('status', 'Pending')}")
+                        comp = st.slider("Completion %", 0, 100, int(r.get("completion", 0)), key=r.get("_id"))
+                        if st.button(f"Update {r.get('task')}", key=f"upd_{r.get('_id')}"):
                             r["completion"] = comp
                             r["marks"] = float(lin_reg.predict([[comp]])[0])
                             r["status"] = "In Progress" if comp < 100 else "Completed"
-                            upsert_data(r.get("_id") or str(uuid.uuid4()), r)
-                            st.success(f"Task '{task_title}' updated successfully.")
+                            upsert_data(r.get("_id"), r)
+                            st.success(f"Updated {r.get('task')} to {comp}%")
 
-            # ---- TAB 2: LEAVE MANAGEMENT ----
             with tab2:
                 st.subheader("Leave Management")
                 typ = st.selectbox("Leave Type", ["Casual", "Sick", "Earned"])
                 f = st.date_input("From Date")
                 t = st.date_input("To Date")
-                reason = st.text_area("Reason for Leave")
+                reason = st.text_area("Reason")
                 if st.button("Submit Leave Request"):
                     lid = str(uuid.uuid4())
-                    md = {
-                        "employee": name,
-                        "type": typ,
-                        "from": str(f),
-                        "to": str(t),
-                        "reason": reason,
-                        "status": "Pending",
-                        "submitted": now()
-                    }
+                    md = {"employee": name, "type": typ, "from": str(f), "to": str(t), "reason": reason, "status": "Pending", "submitted": now()}
                     upsert_data(lid, md)
                     st.success("Leave submitted successfully.")
-
                 if not my_leaves.empty:
-                    st.markdown("### My Leave History")
-                    my_leaves = my_leaves[["type", "from", "to", "reason", "status"]].fillna("")
-                    st.dataframe(my_leaves, use_container_width=True)
-                else:
-                    st.info("No leave history available.")
+                    st.dataframe(my_leaves[["type", "from", "to", "reason", "status"]], use_container_width=True)
 
 # ---------------------------------------------------------
-# CLIENT DASHBOARD (WITH RE-EVALUATION)
+# CLIENT DASHBOARD
 # ---------------------------------------------------------
 elif role == "Client":
-    st.header("Client Review Center")
-
+    st.header("Client Review Portal")
     company = st.text_input("Company Name")
-    if company:
-        df = fetch_all()
-        df_client = df[df["company"].str.lower() == company.lower()] if not df.empty else pd.DataFrame()
-
-        if df_client.empty:
-            st.info("No tasks found.")
+    df = fetch_all()
+    if not df.empty:
+        dfc = df[df["company"].str.lower() == company.lower()] if company else pd.DataFrame()
+        if dfc.empty:
+            st.info("No tasks for this company.")
         else:
             tab1, tab2 = st.tabs(["Initial Review", "Re-Evaluation"])
-
-            # ---- TAB 1: INITIAL REVIEW ----
             with tab1:
-                st.subheader("Pending Reviews")
-                unreviewed = df_client[df_client["client_reviewed"] != True]
-                if not unreviewed.empty:
-                    task_sel = st.selectbox("Select Task to Review", unreviewed["task"].unique())
+                unrev = dfc[dfc["client_reviewed"] != True]
+                if unrev.empty:
+                    st.info("No pending reviews.")
+                else:
+                    task = st.selectbox("Select Task", unrev["task"].unique())
                     fb = st.text_area("Feedback")
                     rating = st.slider("Rating (1–5)", 1, 5, 3)
-                    if st.button("Submit Feedback"):
-                        row = unreviewed[unreviewed["task"] == task_sel].iloc[0].to_dict()
-                        row.update({
-                            "client_feedback": fb,
-                            "client_rating": rating,
-                            "client_reviewed": True,
-                            "client_approved_on": now()
-                        })
-                        upsert_data(row.get("_id") or str(uuid.uuid4()), row)
-                        st.success("Feedback submitted successfully.")
-                else:
-                    st.info("No unreviewed tasks available.")
-
-            # ---- TAB 2: RE-EVALUATION ----
+                    if st.button("Submit Review"):
+                        rec = unrev[unrev["task"] == task].iloc[0].to_dict()
+                        rec.update({"client_feedback": fb, "client_rating": rating, "client_reviewed": True, "client_approved_on": now()})
+                        upsert_data(rec.get("_id"), rec)
+                        st.success("Review submitted.")
             with tab2:
-                st.subheader("Re-Evaluation")
-                reviewed = df_client[df_client["client_reviewed"] == True]
-                if reviewed.empty:
-                    st.info("No tasks available for re-evaluation.")
+                revd = dfc[dfc["client_reviewed"] == True]
+                if revd.empty:
+                    st.info("No tasks eligible for re-evaluation.")
                 else:
-                    task_sel = st.selectbox("Select Task to Re-Evaluate", reviewed["task"].unique())
-                    fb = st.text_area("Updated Feedback (after improvement)")
-                    rating = st.slider("Re-Evaluation Rating (1–5)", 1, 5, 3)
+                    task = st.selectbox("Select Task", revd["task"].unique())
+                    fb = st.text_area("Re-Evaluation Feedback")
+                    rating = st.slider("New Rating (1–5)", 1, 5, 3)
                     if st.button("Submit Re-Evaluation"):
-                        row = reviewed[reviewed["task"] == task_sel].iloc[0].to_dict()
-                        row.update({
-                            "client_feedback_reval": fb,
-                            "client_rating_reval": rating,
-                            "client_revaluated": True,
-                            "client_reval_on": now()
-                        })
-                        upsert_data(row.get("_id") or str(uuid.uuid4()), row)
-                        st.success("Re-Evaluation submitted successfully.")
+                        rec = revd[revd["task"] == task].iloc[0].to_dict()
+                        rec.update({"client_reval_feedback": fb, "client_reval_rating": rating, "client_revaluated": True, "client_reval_on": now()})
+                        upsert_data(rec.get("_id"), rec)
+                        st.success("Re-evaluation submitted successfully.")
 
 # ---------------------------------------------------------
-# ADMIN DASHBOARD (WITH CLUSTERING)
+# HR DASHBOARD
 # ---------------------------------------------------------
-elif role == "Admin":
-    st.header("Admin Dashboard & HR Intelligence")
+elif role == "HR":
+    st.header("HR Intelligence & Performance Dashboard")
     df = fetch_all()
-
     if df.empty:
-        st.info("No data available.")
+        st.info("No HR data yet.")
     else:
-        for col in ["employee", "department", "task", "completion", "marks"]:
-            if col not in df.columns:
-                df[col] = ""
+        for c in ["employee", "department", "task", "completion", "marks"]:
+            if c not in df.columns:
+                df[c] = ""
         df["completion"] = pd.to_numeric(df["completion"], errors="coerce").fillna(0)
         df["marks"] = pd.to_numeric(df["marks"], errors="coerce").fillna(0)
 
-        tab1, tab2 = st.tabs(["Performance Summary", "Clustering Insights"])
+        tab1, tab2 = st.tabs(["Performance Overview", "Clustering Analytics"])
 
-        # ---- TAB 1: PERFORMANCE ----
         with tab1:
             st.subheader("Performance Summary")
             st.dataframe(df[["employee", "department", "task", "completion", "marks"]], use_container_width=True)
-            avg_c = df["completion"].mean()
-            avg_m = df["marks"].mean()
-            st.metric("Avg Completion", f"{avg_c:.1f}%")
-            st.metric("Avg Marks", f"{avg_m:.2f}")
+            st.metric("Average Completion", f"{df['completion'].mean():.1f}%")
+            st.metric("Average Marks", f"{df['marks'].mean():.2f}")
+            st.metric("Active Employees", df["employee"].nunique())
 
-        # ---- TAB 2: CLUSTERING ----
         with tab2:
-            st.subheader("Employee Clustering Insights")
-            if len(df) > 2:
+            st.subheader("Clustering Insights")
+            if len(df) > 3:
                 km = KMeans(n_clusters=3, n_init=10, random_state=42)
                 df["cluster"] = km.fit_predict(df[["completion", "marks"]])
                 fig = px.scatter(
-                    df,
-                    x="completion",
-                    y="marks",
+                    df, x="completion", y="marks",
                     color=df["cluster"].astype(str),
                     hover_data=["employee", "department", "task"],
                     title="Performance Clusters"
                 )
                 st.plotly_chart(fig, use_container_width=True)
-                st.info("Cluster 0: Top Performers | Cluster 1: Average | Cluster 2: Needs Improvement")
             else:
                 st.info("Not enough data for clustering.")
