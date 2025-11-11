@@ -1,10 +1,8 @@
-# main.py — AI Workforce Intelligence Platform (Enterprise, full)
+# main.py — AI Workforce Intelligence Platform (improved)
 # Requirements:
 # pip install streamlit pinecone-client scikit-learn plotly huggingface-hub pandas openpyxl PyPDF2
 
 import streamlit as st
-from pinecone import Pinecone, ServerlessSpec
-import plotly.express as px
 import numpy as np
 import pandas as pd
 import uuid
@@ -14,17 +12,30 @@ from datetime import datetime, date
 from sklearn.linear_model import LinearRegression
 from sklearn.cluster import KMeans
 
-# optional
+# Optional imports with availability flags
 try:
     from huggingface_hub import InferenceClient
     HF_AVAILABLE = True
 except Exception:
     HF_AVAILABLE = False
+
 try:
     import PyPDF2
     PDF_AVAILABLE = True
 except Exception:
     PDF_AVAILABLE = False
+
+# Pinecone: attempt import/initialization but fail gracefully
+PINECONE_AVAILABLE = False
+pc = None
+index = None
+try:
+    # keep original import style; if you use a different pinecone client version,
+    # update these lines accordingly.
+    from pinecone import Pinecone, ServerlessSpec
+    PINECONE_AVAILABLE = True
+except Exception:
+    PINECONE_AVAILABLE = False
 
 # ----------------------------
 # App config
@@ -37,47 +48,42 @@ st.title("AI Workforce Intelligence Platform")
 # ----------------------------
 PINECONE_API_KEY = st.secrets.get("PINECONE_API_KEY", "")
 HF_TOKEN = st.secrets.get("HUGGINGFACEHUB_API_TOKEN", "")
-INDEX_NAME = "task"
-DIMENSION = 1024
+INDEX_NAME = "task"   # must be lowercase alphanumeric or '-'
+DIMENSION = int(st.secrets.get("VECTOR_DIMENSION", 1024))
 
 # ----------------------------
-# Pinecone init (best-effort)
+# Pinecone init (best-effort & non-blocking)
 # ----------------------------
-pc = None
-index = None
-if PINECONE_API_KEY:
+if PINECONE_AVAILABLE and PINECONE_API_KEY:
     try:
         pc = Pinecone(api_key=PINECONE_API_KEY)
-        existing = [i["name"] for i in pc.list_indexes()]
+        existing = []
+        try:
+            existing = [i["name"] for i in pc.list_indexes() or []]
+        except Exception:
+            existing = []
         if INDEX_NAME not in existing:
-            pc.create_index(
-                name=INDEX_NAME,
-                dimension=DIMENSION,
-                metric="cosine",
-                spec=ServerlessSpec(cloud="aws", region="us-east-1"),
-            )
-            for _ in range(20):
-                try:
-                    desc = pc.describe_index(INDEX_NAME)
-                    if desc.get("status", {}).get("ready"):
-                        break
-                except Exception:
-                    pass
-                time.sleep(1)
-        index = pc.Index(INDEX_NAME)
-        st.caption(f"Connected to Pinecone index: {INDEX_NAME}")
+            try:
+                pc.create_index(
+                    name=INDEX_NAME,
+                    dimension=DIMENSION,
+                    metric="cosine",
+                    spec=ServerlessSpec(cloud="aws", region="us-east-1"),
+                )
+            except Exception:
+                # Create may fail depending on permissions or client version; continue
+                pass
+        try:
+            index = pc.Index(INDEX_NAME)
+            st.caption(f"Attempting to connect to Pinecone index: {INDEX_NAME}")
+        except Exception:
+            index = None
+            st.warning("Could not connect to Pinecone index — running local-only.")
     except Exception as e:
+        index = None
         st.warning(f"Pinecone init failed — running local-only. ({e})")
 else:
-    st.warning("Pinecone API key missing — running local-only.")
-
-# ----------------------------
-# Ensure session structures
-# ----------------------------
-if "PINECONE_IDS" not in st.session_state:
-    st.session_state["PINECONE_IDS"] = []
-if "LOCAL_DATA" not in st.session_state:
-    st.session_state["LOCAL_DATA"] = {}
+    st.warning("Pinecone missing or not configured — running local-only.")
 
 # ----------------------------
 # Utilities
@@ -85,25 +91,9 @@ if "LOCAL_DATA" not in st.session_state:
 def now():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-# --- safer random vector / embedding placeholder ---
 def rand_vec():
-    """Generate deterministic random-like vector."""
-    return np.random.rand(DIMENSION).tolist()
-
-# Optional: use Hugging Face embeddings (fallback to rand_vec)
-def get_embedding(text: str):
-    if not HF_AVAILABLE or not HF_TOKEN:
-        return rand_vec()
-    try:
-        client = InferenceClient(token=HF_TOKEN)
-        res = client.embeddings(model="sentence-transformers/all-MiniLM-L6-v2", inputs=text)
-        if isinstance(res, dict) and "embedding" in res:
-            return res["embedding"]
-        if isinstance(res, list) and len(res) and isinstance(res[0], dict) and "embedding" in res[0]:
-            return res[0]["embedding"]
-        return rand_vec()
-    except Exception:
-        return rand_vec()
+    # deterministic shape, numpy float -> list
+    return np.random.rand(DIMENSION).astype(float).tolist()
 
 def safe_meta(md: dict) -> dict:
     """Convert metadata to JSON-friendly primitives."""
@@ -122,82 +112,73 @@ def safe_meta(md: dict) -> dict:
             clean[k] = str(v)
     return clean
 
-# --- FIXED: upsert_data + fetch_all ---
-def _register_id(id_):
-    """Keep all IDs in session for reliable fetch."""
-    id_ = str(id_)
-    ids = st.session_state.get("PINECONE_IDS", [])
-    if id_ not in ids:
-        ids.append(id_)
-        st.session_state["PINECONE_IDS"] = ids
-
 def upsert_data(id_, md: dict) -> bool:
-    """Upsert record to Pinecone or local storage with ID tracking."""
+    """Upsert record to Pinecone or session-local storage if Pinecone not available."""
     id_ = str(id_)
-    _register_id(id_)
-    meta = safe_meta(md)
-
     if not index:
-        st.session_state["LOCAL_DATA"][id_] = meta
+        loc = st.session_state.setdefault("LOCAL_DATA", {})
+        loc[id_] = md
         return True
     try:
-        vec = get_embedding(md.get("description", md.get("task", "")))
-        index.upsert(vectors=[{"id": id_, "values": vec, "metadata": meta}])
+        # Pinecone expects numeric lists for 'values' (vector)
+        index.upsert([{"id": id_, "values": rand_vec(), "metadata": safe_meta(md)}])
         return True
     except Exception as e:
-        st.warning(f"Pinecone upsert failed — saved locally. ({e})")
-        st.session_state["LOCAL_DATA"][id_] = meta
+        st.warning(f"Pinecone upsert failed — storing locally. ({e})")
+        loc = st.session_state.setdefault("LOCAL_DATA", {})
+        loc[id_] = md
         return False
 
 def fetch_all() -> pd.DataFrame:
-    """Fetch all metadata records reliably using stored IDs."""
-    ids = st.session_state.get("PINECONE_IDS", [])
-
-    # local fallback
+    """Fetch all metadata records from Pinecone (or local storage). Returns DataFrame with _id column."""
     if not index:
+        local = st.session_state.get("LOCAL_DATA", {})
         rows = []
-        for k, md in st.session_state["LOCAL_DATA"].items():
+        for k, md in local.items():
             rec = dict(md)
             rec["_id"] = k
             rows.append(rec)
         return pd.DataFrame(rows)
-
-    if not ids:
-        return pd.DataFrame()
-
     try:
-        res = index.fetch(ids=ids)
-        vectors = getattr(res, "vectors", None)
-        if vectors is None and isinstance(res, dict):
-            vectors = res.get("vectors", {})
+        # avoid querying empty index — use describe_index_stats if available
+        try:
+            stats = index.describe_index_stats()
+            if stats and stats.get("total_vector_count", 0) == 0:
+                return pd.DataFrame()
+        except Exception:
+            pass
+        # Using a random query to fetch up to 1000 entries — metadata included
+        res = index.query(vector=rand_vec(), top_k=1000, include_metadata=True)
+        matches = getattr(res, "matches", None) or res.get("matches", []) if isinstance(res, dict) else []
+        if not matches:
+            return pd.DataFrame()
         rows = []
-        if isinstance(vectors, dict):
-            for vid, info in vectors.items():
-                md = info.get("metadata", {}) if isinstance(info, dict) else {}
-                md["_id"] = vid
-                rows.append(md)
+        for m in matches:
+            md = getattr(m, "metadata", None) or m.get("metadata", {}) if isinstance(m, dict) else {}
+            _id = getattr(m, "id", None) or m.get("id")
+            md["_id"] = _id
+            rows.append(md)
         return pd.DataFrame(rows)
     except Exception as e:
-        st.warning(f"Fetch error: {e}")
-        # fallback to local data
-        rows = []
-        for k, md in st.session_state["LOCAL_DATA"].items():
-            rec = dict(md)
-            rec["_id"] = k
-            rows.append(rec)
-        return pd.DataFrame(rows)
+        st.warning(f"Fetch error — returning empty DataFrame. ({e})")
+        return pd.DataFrame()
 
 # ----------------------------
-# Hugging Face text generation
+# Hugging Face wrapper (safe)
 # ----------------------------
 def hf_text_generation(prompt: str, model: str = "mistralai/Mixtral-8x7B-Instruct", max_new_tokens: int = 200):
     if not HF_AVAILABLE or not HF_TOKEN:
         raise RuntimeError("Hugging Face client or token not available")
     client = InferenceClient(token=HF_TOKEN)
     try:
-        res = client.text_generation(model=model, inputs=prompt, max_new_tokens=max_new_tokens)
-    except TypeError:
-        res = client.text_generation(model=model, prompt=prompt, max_new_tokens=max_new_tokens)
+        # some client versions accept 'inputs', others 'prompt'
+        try:
+            res = client.text_generation(model=model, inputs=prompt, max_new_tokens=max_new_tokens)
+        except TypeError:
+            res = client.text_generation(model=model, prompt=prompt, max_new_tokens=max_new_tokens)
+    except Exception as e:
+        raise RuntimeError(f"HF generation failed: {e}")
+    # extract text safely
     if isinstance(res, dict):
         return res.get("generated_text") or res.get("output") or json.dumps(res)
     if isinstance(res, list) and res and isinstance(res[0], dict):
@@ -205,45 +186,538 @@ def hf_text_generation(prompt: str, model: str = "mistralai/Mixtral-8x7B-Instruc
     return str(res)
 
 # ----------------------------
-# Linear regression for marks
+# ML helpers
 # ----------------------------
 lin_reg = LinearRegression().fit([[0], [50], [100]], [0, 2.5, 5])
 
-# ----------------------------
-# Parse attendees
-# ----------------------------
 def parse_attendees_field(val):
+    """
+    Accepts:
+      - list of strings
+      - JSON string of list (double or single quotes)
+      - raw comma-separated string
+    Returns list of lowercased trimmed names.
+    """
     if isinstance(val, list):
         return [a.strip().lower() for a in val if isinstance(a, str) and a.strip()]
     if isinstance(val, str):
         s = val.strip()
+        # try JSON first (normalize single quotes)
         if s.startswith("[") and s.endswith("]"):
             try:
-                parsed = json.loads(s.replace("'", '"'))
+                parsed = json.loads(s)
                 if isinstance(parsed, list):
                     return [a.strip().lower() for a in parsed if isinstance(a, str) and a.strip()]
             except Exception:
-                s2 = s.strip("[]").replace("'", "")
-                return [a.strip().lower() for a in s2.split(",") if a.strip()]
+                # try replace single quotes with double quotes then parse
+                try:
+                    parsed = json.loads(s.replace("'", '"'))
+                    if isinstance(parsed, list):
+                        return [a.strip().lower() for a in parsed if isinstance(a, str) and a.strip()]
+                except Exception:
+                    s2 = s.strip("[]").replace("'", "")
+                    return [a.strip().lower() for a in s2.split(",") if a.strip()]
         return [a.strip().lower() for a in s.split(",") if a.strip()]
     return []
 
 # ----------------------------
-# Role selector
+# Role selection UI
 # ----------------------------
 role = st.sidebar.selectbox("Login as", ["Manager", "Team Member", "Client", "HR (Admin)"])
 current_month = datetime.now().strftime("%B %Y")
 
 # ----------------------------
-# --- All role logic below ---
-# (No changes in structure)
+# MANAGER
 # ----------------------------
+if role == "Manager":
+    st.header("Manager Dashboard")
+    tabs = st.tabs(["Task Management", "Feedback & Review", "Meetings", "Leave Approvals", "Team Overview", "AI Insights"])
 
-# [KEEP YOUR ORIGINAL FULL ROLE BLOCKS BELOW — unchanged]
-# ↓↓↓ paste your existing code for Manager, Team Member, Client, HR exactly as it was ↓↓↓
+    # --- Task Management (assign + reassign) ----
+    with tabs[0]:
+        st.subheader("Assign Task")
+        with st.form("assign_task"):
+            company = st.text_input("Client Company Name")
+            department = st.text_input("Department")
+            employee = st.text_input("Employee Name")
+            task_title = st.text_input("Task Title")
+            description = st.text_area("Description")
+            deadline = st.date_input("Deadline", value=date.today())
+            submit = st.form_submit_button("Assign Task")
+            if submit:
+                if not employee or not task_title:
+                    st.warning("Employee and Task Title required.")
+                else:
+                    tid = str(uuid.uuid4())
+                    md = {
+                        "type": "Task",
+                        "company": company or "",
+                        "department": department or "",
+                        "employee": employee,
+                        "task": task_title,
+                        "description": description or "",
+                        "deadline": str(deadline),
+                        "completion": 0,
+                        "marks": 0,
+                        "status": "Assigned",
+                        "created": now()
+                    }
+                    upsert_data(tid, md)
+                    st.success(f"Assigned '{task_title}' to {employee} for {company or '—'}")
+
+        # quick tasks table and reassign block
+        df_all = fetch_all()
+        df_tasks = pd.DataFrame()
+        if not df_all.empty:
+            if "type" in df_all.columns:
+                df_tasks = df_all[df_all["type"] == "Task"]
+            else:
+                df_tasks = df_all[df_all.get("task", "").astype(str) != ""]
+        if df_tasks.empty:
+            st.info("No tasks found.")
+        else:
+            for col in ["company", "employee", "department", "task", "status", "completion", "deadline", "created"]:
+                if col not in df_tasks.columns:
+                    df_tasks[col] = ""
+            df_tasks["completion"] = pd.to_numeric(df_tasks["completion"], errors="coerce").fillna(0)
+            st.dataframe(df_tasks[["company","employee","department","task","status","completion","deadline"]], use_container_width=True)
+
+            st.markdown("---")
+            st.subheader("Reassign Task")
+            task_choice = st.selectbox("Select Task", df_tasks["task"].dropna().unique())
+            new_emp = st.text_input("New Employee Name")
+            reas = st.text_area("Reason for Reassignment")
+            if st.button("Reassign Task"):
+                rec = df_tasks[df_tasks["task"] == task_choice].iloc[0].to_dict()
+                rec["employee"] = new_emp or rec.get("employee", "")
+                rec["status"] = "Reassigned"
+                rec["reassigned_reason"] = reas
+                rec["reassigned_on"] = now()
+                upsert_data(rec.get("_id") or str(uuid.uuid4()), rec)
+                st.success("Task reassigned.")
+
+    # --- Manager Feedback & marks (before client) ---
+    with tabs[1]:
+        st.subheader("Manager Feedback & Marks Review")
+        df_all = fetch_all()
+        if df_all.empty:
+            st.info("No data available.")
+        else:
+            df_tasks = df_all[df_all.get("type") == "Task"] if "type" in df_all.columns else df_all[df_all.get("task", "").astype(str) != ""]
+            if df_tasks.empty:
+                st.info("No tasks found.")
+            else:
+                df_tasks["completion"] = pd.to_numeric(df_tasks.get("completion", 0), errors="coerce").fillna(0)
+                pending_review = df_tasks[(df_tasks["completion"] >= 100) & (df_tasks.get("status") != "Under Client Review")]
+                if pending_review.empty:
+                    st.info("No completed tasks awaiting review.")
+                else:
+                    task_sel = st.selectbox("Select completed task", pending_review["task"].dropna().unique())
+                    row = pending_review[pending_review["task"] == task_sel].iloc[0].to_dict()
+                    st.write(f"Employee: {row.get('employee','')}  |  Company: {row.get('company','')}")
+                    st.write(f"Task: {row.get('task','')}")
+                    final_marks = st.slider("Final Marks (0–5)", 0.0, 5.0, float(row.get("marks", 0)))
+                    manager_feedback = st.text_area("Manager Comments")
+                    if st.button("Finalize & Send to Client"):
+                        row["marks"] = final_marks
+                        row["manager_feedback"] = manager_feedback
+                        row["manager_reviewed_on"] = now()
+                        row["status"] = "Under Client Review"
+                        upsert_data(row.get("_id") or str(uuid.uuid4()), row)
+                        st.success("Task reviewed and sent for client evaluation.")
+
+    # --- Meetings (schedule + notes + attendees) ---
+    with tabs[2]:
+        st.subheader("Meeting Scheduler")
+        with st.form("schedule_meeting"):
+            meeting_title = st.text_input("Meeting Title")
+            meeting_company = st.text_input("Client Company (optional)")
+            meeting_date = st.date_input("Meeting Date", value=date.today())
+            meeting_time = st.text_input("Meeting Time (HH:MM)", value="10:00")
+            attendees_raw = st.text_area("Attendees (comma-separated names)")
+            notes_file = st.file_uploader("Upload notes (txt/pdf/csv/xlsx)", type=["txt","pdf","csv","xlsx"])
+            submit_meet = st.form_submit_button("Schedule Meeting")
+            if submit_meet:
+                mid = str(uuid.uuid4())
+                attendees_list = [a.strip().lower() for a in attendees_raw.split(",") if a.strip()]
+                md = {
+                    "type": "Meeting",
+                    "company": meeting_company or "",
+                    "meeting_title": meeting_title or "",
+                    "meeting_date": str(meeting_date),
+                    "meeting_time": meeting_time or "",
+                    "attendees": json.dumps(attendees_list),
+                    "created": now()
+                }
+                # extract text from uploaded file if any
+                if notes_file:
+                    fname = notes_file.name.lower()
+                    try:
+                        if fname.endswith(".txt"):
+                            content = notes_file.read().decode("utf-8", errors="ignore")
+                        elif fname.endswith(".pdf") and PDF_AVAILABLE:
+                            reader = PyPDF2.PdfReader(notes_file)
+                            content = "\n".join([p.extract_text() or "" for p in reader.pages])
+                        elif fname.endswith(".csv"):
+                            content = pd.read_csv(notes_file).to_csv(index=False)
+                        elif fname.endswith(".xlsx"):
+                            content = pd.read_excel(notes_file).to_csv(index=False)
+                        else:
+                            content = ""
+                        md["notes_file"] = notes_file.name
+                        md["notes_text"] = content[:20000]
+                    except Exception as e:
+                        md["notes_text"] = f"ERROR reading file: {e}"
+                upsert_data(mid, md)
+                st.success("Meeting scheduled.")
+
+        st.markdown("---")
+        st.subheader("Upcoming Meetings")
+        df_all = fetch_all()
+        meets = pd.DataFrame()
+        if not df_all.empty:
+            meets = df_all[df_all.get("type") == "Meeting"]
+        if meets.empty:
+            st.info("No meetings scheduled.")
+        else:
+            for c in ["meeting_title","company","meeting_date","meeting_time","attendees","notes_file"]:
+                if c not in meets.columns:
+                    meets[c] = ""
+            display_meets = meets[["company","meeting_title","meeting_date","meeting_time","attendees","notes_file"]].fillna("")
+            st.dataframe(display_meets, use_container_width=True)
+
+            sel = st.selectbox("Select meeting to view/summarize", meets["meeting_title"].dropna().unique())
+            if sel:
+                mrow = meets[meets["meeting_title"] == sel].iloc[0].to_dict()
+                notes = mrow.get("notes_text","")
+                st.text_area("Notes preview", notes, height=200)
+                if st.button("AI Summarize Meeting Notes"):
+                    if HF_AVAILABLE and HF_TOKEN:
+                        try:
+                            prompt = f"Summarize and extract actions from these meeting notes:\n\n{notes[:4000]}"
+                            out = hf_text_generation(prompt=prompt, max_new_tokens=250)
+                            st.subheader("AI Summary")
+                            st.write(out)
+                        except Exception as e:
+                            st.error(f"AI summarization failed: {e}")
+                    else:
+                        st.warning("Hugging Face not configured.")
+
+    # --- Leave approvals ---
+    with tabs[3]:
+        st.subheader("Leave Approvals")
+        df_all = fetch_all()
+        leaves = pd.DataFrame()
+        if not df_all.empty:
+            if "type" in df_all.columns:
+                leaves = df_all[df_all["type"] == "Leave"]
+            else:
+                leaves = df_all[df_all.get("leave_type").notna() | (df_all.get("task","") == "")]
+        if leaves.empty:
+            st.info("No leave requests.")
+        else:
+            for i, row in leaves.iterrows():
+                status = str(row.get("status","")).strip().lower()
+                if status == "pending":
+                    emp = row.get("employee","Unknown")
+                    lt = row.get("leave_type","Leave")
+                    st.markdown(f"**{emp}** requested **{lt}** ({row.get('from','')} → {row.get('to','')})")
+                    st.write(f"Reason: {row.get('reason','-')}")
+                    decision = st.radio(f"Decision for {emp}", ["Approve","Reject"], key=f"lv_dec_{i}")
+                    if st.button(f"Finalize decision for {emp}", key=f"lv_btn_{i}"):
+                        updated = dict(row)
+                        updated["_id"] = str(row.get("_id") or uuid.uuid4())
+                        updated["status"] = "Approved" if decision == "Approve" else "Rejected"
+                        updated["approved_by"] = "Manager"
+                        updated["approved_on"] = now()
+                        upsert_data(updated["_id"], updated)
+                        st.success(f"Leave {updated['status']} for {emp}")
+
+    # --- Team Overview + AI insights quick ---
+    with tabs[4]:
+        st.subheader("Team Overview")
+        df_all = fetch_all()
+        df_tasks = pd.DataFrame()
+        if not df_all.empty:
+            df_tasks = df_all[df_all.get("type") == "Task"]
+        if df_tasks.empty:
+            st.info("No tasks.")
+        else:
+            for col in ["company","department","employee","task","completion","marks","status","created"]:
+                if col not in df_tasks.columns:
+                    df_tasks[col] = ""
+            df_tasks["completion"] = pd.to_numeric(df_tasks["completion"], errors="coerce").fillna(0)
+            st.dataframe(df_tasks[["company","department","employee","task","completion","status"]], use_container_width=True)
+            try:
+                fig = None
+                if "department" in df_tasks.columns and df_tasks["department"].notna().any():
+                    fig = px.bar(df_tasks, x="employee", y="completion", color="department", title="Completion by Employee")
+                else:
+                    fig = px.bar(df_tasks, x="employee", y="completion", title="Completion by Employee")
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception:
+                pass
+
+    # --- AI Insights tab (expanded) ---
+    with tabs[5]:
+        st.subheader("AI Insights")
+        df_all = fetch_all()
+        if df_all.empty:
+            st.info("No data available.")
+        else:
+            q = st.text_input("Ask AI (e.g., 'Who is underperforming this week?')")
+            if st.button("Generate Insight"):
+                if HF_AVAILABLE and HF_TOKEN:
+                    try:
+                        summary = df_all.describe(include="all").to_dict()
+                        prompt = f"You are an analyst. Given dataset summary:\n{summary}\nQuestion: {q}\nAnswer with concise, numbered insights and suggested actions."
+                        out = hf_text_generation(prompt=prompt, max_new_tokens=200)
+                        st.write(out)
+                    except Exception as e:
+                        st.error(f"AI query failed: {e}")
+                else:
+                    st.warning("Hugging Face not configured.")
 
 # ----------------------------
-# MANAGER / TEAM MEMBER / CLIENT / HR CODE BLOCKS
+# TEAM MEMBER
 # ----------------------------
-# (Everything below this line remains your same content)
-# -------------------------------------------------------
+elif role == "Team Member":
+    st.header("Team Member Dashboard")
+    name = st.text_input("Enter your name")
+    company = st.text_input("Enter your company name (if applicable)")
+
+    if name:
+        df_all = fetch_all()
+        if df_all.empty:
+            st.info("No data present.")
+        else:
+            if "type" not in df_all.columns:
+                df_all["type"] = df_all.apply(lambda r: "Task" if pd.notna(r.get("task")) and r.get("task") != "" else "Leave", axis=1)
+
+            cond = (df_all.get("employee","").astype(str).str.lower() == name.lower())
+            if company:
+                cond = cond & (df_all.get("company","").astype(str).str.lower() == company.lower())
+            my_tasks = df_all[cond & (df_all["type"] == "Task")]
+
+            st.subheader("My Tasks")
+            if my_tasks.empty:
+                st.info("No tasks assigned.")
+            else:
+                for _, r in my_tasks.iterrows():
+                    st.markdown(f"**{r.get('task','Untitled')}** — Status: {r.get('status','')}")
+                    try:
+                        curr = int(float(r.get("completion", 0) or 0))
+                    except Exception:
+                        curr = 0
+                    comp = st.slider("Completion %", 0, 100, curr, key=r.get("_id"))
+                    if st.button(f"Update {r.get('_id')}", key=f"upd_{r.get('_id')}"):
+                        r["completion"] = comp
+                        r["marks"] = float(lin_reg.predict([[comp]])[0])
+                        r["status"] = "In Progress" if comp < 100 else "Completed"
+                        upsert_data(r.get("_id") or str(uuid.uuid4()), r)
+                        st.success("Updated task progress.")
+
+            st.markdown("---")
+            st.subheader("My Meetings")
+            meets = df_all[df_all.get("type") == "Meeting"] if not df_all.empty else pd.DataFrame()
+            if meets.empty:
+                st.info("No meetings scheduled.")
+            else:
+                def invited_to_meeting(row):
+                    attendees_field = row.get("attendees", "")
+                    attendees = parse_attendees_field(attendees_field)
+                    return name.strip().lower() in attendees
+                try:
+                    invited_meets = meets[meets.apply(invited_to_meeting, axis=1)]
+                    if invited_meets.empty:
+                        st.info("No meetings with you as attendee.")
+                    else:
+                        display_cols = ["company","meeting_title","meeting_date","meeting_time"]
+                        for c in display_cols:
+                            if c not in invited_meets.columns:
+                                invited_meets[c] = ""
+                        st.dataframe(invited_meets[display_cols].fillna(""), use_container_width=True)
+                except Exception as e:
+                    st.error(f"Error filtering meetings: {e}")
+
+            st.markdown("---")
+            st.subheader("Leave Request")
+            lt = st.selectbox("Leave Type", ["Casual","Sick","Earned"])
+            f = st.date_input("From")
+            t = st.date_input("To")
+            reason = st.text_area("Reason")
+            if st.button("Submit Leave Request"):
+                lid = str(uuid.uuid4())
+                md = {
+                    "type": "Leave",
+                    "employee": name,
+                    "company": company or "",
+                    "leave_type": lt,
+                    "from": str(f),
+                    "to": str(t),
+                    "reason": reason,
+                    "status": "Pending",
+                    "submitted": now()
+                }
+                upsert_data(lid, md)
+                st.success("Leave requested.")
+
+# ----------------------------
+# CLIENT
+# ----------------------------
+elif role == "Client":
+    st.header("Client Dashboard")
+    company = st.text_input("Enter your company name")
+    if company:
+        df_all = fetch_all()
+        if df_all.empty:
+            st.info("No data.")
+        else:
+            df_client = df_all[df_all.get("company","").astype(str).str.lower() == company.lower()]
+            if df_client.empty:
+                st.info("No records for this company.")
+            else:
+                st.subheader("Tasks")
+                df_tasks = df_client[df_client.get("type") == "Task"]
+                if df_tasks.empty:
+                    st.info("No tasks for this company.")
+                else:
+                    for _, r in df_tasks.iterrows():
+                        st.markdown(f"**{r.get('task')}** — Employee: {r.get('employee')} — Status: {r.get('status')}")
+                    st.dataframe(df_tasks[["employee","task","status","completion","marks"]].fillna(""), use_container_width=True)
+
+                    st.markdown("---")
+                    st.subheader("Provide feedback for Manager-reviewed tasks")
+                    pending = df_tasks[(df_tasks.get("status") == "Under Client Review") & (df_tasks.get("client_reviewed") != True)]
+                    if pending.empty:
+                        st.info("No tasks pending client review.")
+                    else:
+                        sel = st.selectbox("Select task to review", pending["task"].unique())
+                        fb = st.text_area("Feedback")
+                        rating = st.slider("Rating (1–5)", 1, 5, 3)
+                        if st.button("Submit Feedback"):
+                            rec = pending[pending["task"] == sel].iloc[0].to_dict()
+                            rec["client_feedback"] = fb
+                            rec["client_rating"] = rating
+                            rec["client_reviewed"] = True
+                            rec["client_approved_on"] = now()
+                            upsert_data(rec.get("_id") or str(uuid.uuid4()), rec)
+                            st.success("Client feedback submitted.")
+
+                st.markdown("---")
+                st.subheader("Company Meetings")
+                meets = df_client[df_client.get("type") == "Meeting"]
+                if meets.empty:
+                    st.info("No meetings for this company.")
+                else:
+                    def display_attendees(v):
+                        try:
+                            if isinstance(v, str):
+                                return ", ".join(parse_attendees_field(v))
+                            if isinstance(v, list):
+                                return ", ".join([a for a in v])
+                        except Exception:
+                            return str(v)
+                        return ""
+                    meets_display = meets.copy()
+                    meets_display["attendees_display"] = meets_display.get("attendees","").apply(display_attendees)
+                    st.dataframe(meets_display[["meeting_title","meeting_date","meeting_time","attendees_display"]].fillna(""), use_container_width=True)
+
+# ----------------------------
+# HR (Admin)
+# ----------------------------
+elif role == "HR (Admin)":
+    st.header("HR Dashboard — Performance Clustering & Leave Tracker")
+    df_all = fetch_all()
+    if df_all.empty:
+        st.info("No records.")
+    else:
+        for c in ["company","employee","department","task","completion","marks","type","status","leave_type","from","to"]:
+            if c not in df_all.columns:
+                df_all[c] = ""
+        df_all["completion"] = pd.to_numeric(df_all.get("completion", 0), errors="coerce").fillna(0)
+        df_all["marks"] = pd.to_numeric(df_all.get("marks", 0), errors="coerce").fillna(0)
+
+        df_tasks = df_all[df_all["type"] == "Task"]
+        df_leaves = df_all[df_all["type"] == "Leave"]
+
+        tabs_hr = st.tabs(["Performance Clustering", "Leave Tracker", "Company Summary"])
+
+        with tabs_hr[0]:
+            st.subheader("Performance Clustering (no risk computation)")
+            if df_tasks.empty:
+                st.info("No task data.")
+            else:
+                try:
+                    data = df_tasks[["completion","marks"]].fillna(0)
+                    if len(data) >= 3:
+                        km = KMeans(n_clusters=3, random_state=42, n_init=10)
+                        df_tasks["cluster"] = km.fit_predict(data)
+                        centers = km.cluster_centers_
+                        order = np.argsort(centers[:,0] + centers[:,1])
+                        label_map = {order[2]:"High Performer", order[1]:"Average", order[0]:"Needs Improvement"}
+                        df_tasks["Performance Group"] = df_tasks["cluster"].map(label_map)
+                    else:
+                        df_tasks["cluster"] = 0
+                        df_tasks["Performance Group"] = "Insufficient data"
+                    st.dataframe(df_tasks[["company","employee","department","completion","marks","Performance Group"]].fillna(""), use_container_width=True)
+                    try:
+                        fig = px.scatter(df_tasks, x="completion", y="marks", color="Performance Group", hover_data=["employee","department"], title="Performance Clusters")
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception:
+                        pass
+                    dp = df_tasks.groupby("department")["completion"].mean().reset_index()
+                    if not dp.empty:
+                        fig2 = px.bar(dp, x="department", y="completion", title="Avg Completion by Department")
+                        st.plotly_chart(fig2, use_container_width=True)
+                except Exception as e:
+                    st.error(f"Clustering failed: {e}")
+
+        with tabs_hr[1]:
+            st.subheader("Leave Tracker")
+            if df_leaves.empty:
+                st.info("No leave records.")
+            else:
+                total = len(df_leaves)
+                pending = int((df_leaves["status"] == "Pending").sum())
+                approved = int((df_leaves["status"] == "Approved").sum())
+                rejected = int((df_leaves["status"] == "Rejected").sum())
+                c1,c2,c3,c4 = st.columns(4)
+                c1.metric("Total requests", total)
+                c2.metric("Pending", pending)
+                c3.metric("Approved", approved)
+                c4.metric("Rejected", rejected)
+                st.markdown("---")
+                st.dataframe(df_leaves[["company","employee","leave_type","from","to","reason","status"]].fillna(""), use_container_width=True)
+                lc = df_leaves.groupby("employee").size().reset_index(name="Total Leaves")
+                if not lc.empty:
+                    fig3 = px.bar(lc, x="employee", y="Total Leaves", title="Leave requests per employee")
+                    st.plotly_chart(fig3, use_container_width=True)
+
+        with tabs_hr[2]:
+            st.subheader("Company Summary")
+            companies = df_all["company"].dropna().astype(str).unique().tolist()
+            if not companies:
+                st.info("No company data.")
+            else:
+                comp = st.selectbox("Select company", companies)
+                comp_df = df_all[df_all.get("company","").astype(str) == comp]
+                tasks = comp_df[comp_df["type"] == "Task"]
+                meets = comp_df[comp_df["type"] == "Meeting"]
+                leaves = comp_df[comp_df["type"] == "Leave"]
+                st.metric("Total tasks", len(tasks))
+                st.metric("Total meetings", len(meets))
+                st.metric("Total leave requests", len(leaves))
+                if not tasks.empty:
+                    st.markdown("### Tasks (sample)")
+                    st.dataframe(tasks[["employee","task","status","completion","marks"]].fillna(""), use_container_width=True)
+                if not meets.empty:
+                    st.markdown("### Meetings (sample)")
+                    st.dataframe(meets[["meeting_title","meeting_date","meeting_time","attendees"]].fillna(""), use_container_width=True)
+                if not leaves.empty:
+                    st.markdown("### Leaves (sample)")
+                    st.dataframe(leaves[["employee","leave_type","from","to","status"]].fillna(""), use_container_width=True)
+
+# ----------------------------
+# End of app
+# ----------------------------
