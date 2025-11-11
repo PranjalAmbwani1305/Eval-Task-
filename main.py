@@ -1,5 +1,5 @@
 # ============================================================
-# main.py — Enterprise Workforce Performance Intelligence System (Final Stable)
+# main.py — Enterprise Workforce Performance Intelligence System (Final)
 # ============================================================
 # Requirements:
 # pip install streamlit pinecone-client pandas scikit-learn plotly openpyxl PyPDF2 huggingface-hub tqdm
@@ -129,16 +129,28 @@ def upsert_data(id_, md: dict):
     # ---- Pinecone upsert ----
     try:
         vec = rand_vec()
-        try:
-            index.delete(ids=[id_])
-        except Exception:
-            pass
         index.upsert(vectors=[{"id": id_, "values": vec, "metadata": md}])
         return True
     except Exception as e:
-        st.warning(f"Pinecone upsert failed — switching to local. ({e})")
+        st.warning(f"Pinecone upsert failed — storing locally instead. ({e})")
         st.session_state["LOCAL_DATA"][id_] = md
         return False
+
+# ------------------------------------------------------------
+# Find Existing Record (Prevents Duplicates)
+# ------------------------------------------------------------
+def find_existing_record(df: pd.DataFrame, type_: str, employee: str, task_title: str = None):
+    """Find existing record ID by type, employee, and task (if provided)."""
+    if df.empty:
+        return None
+    subset = df[df["type"] == type_]
+    if "employee" in subset.columns:
+        subset = subset[subset["employee"].astype(str).str.lower() == employee.lower()]
+    if task_title and "task" in subset.columns:
+        subset = subset[subset["task"].astype(str).str.lower() == task_title.lower()]
+    if subset.empty:
+        return None
+    return subset.iloc[0].get("_id")
 
 # ------------------------------------------------------------
 # Fetch All Records
@@ -168,20 +180,6 @@ def fetch_all() -> pd.DataFrame:
         return pd.DataFrame()
 
 # ------------------------------------------------------------
-# Hugging Face Generator
-# ------------------------------------------------------------
-def hf_generate(prompt: str, model="microsoft/Phi-3-mini-4k-instruct", max_new_tokens=200):
-    if not HF_AVAILABLE or not HF_TOKEN:
-        raise RuntimeError("Hugging Face not available")
-    client = InferenceClient(token=HF_TOKEN)
-    res = client.text_generation(model=model, inputs=prompt, max_new_tokens=max_new_tokens)
-    if isinstance(res, dict):
-        return res.get("generated_text") or res.get("output") or json.dumps(res)
-    if isinstance(res, list) and isinstance(res[0], dict):
-        return res[0].get("generated_text") or res[0].get("output")
-    return str(res)
-
-# ------------------------------------------------------------
 # Linear Regression Helper
 # ------------------------------------------------------------
 lin_reg = LinearRegression().fit([[0], [50], [100]], [0, 2.5, 5])
@@ -196,7 +194,7 @@ role = st.sidebar.selectbox("Login as", ["Manager", "Team Member", "Client", "HR
 # ============================================================
 if role == "Manager":
     st.header("Manager Dashboard")
-    tabs = st.tabs(["Task Management", "Feedback", "Meetings", "Leave Approvals", "Team Overview", "AI Insights"])
+    tabs = st.tabs(["Task Management", "Feedback", "Meetings", "Leave Approvals", "Team Overview"])
 
     # ---------------- Task Management ----------------
     with tabs[0]:
@@ -210,7 +208,9 @@ if role == "Manager":
             deadline = st.date_input("Deadline", value=date.today())
             submit = st.form_submit_button("Assign Task")
             if submit and emp and task:
-                tid = str(uuid.uuid4())
+                df_all = fetch_all()
+                existing_id = find_existing_record(df_all, "Task", emp, task)
+                tid = existing_id or str(uuid.uuid4())
                 md = {
                     "type": "Task", "company": company, "department": dept,
                     "employee": emp, "task": task, "description": desc,
@@ -239,36 +239,17 @@ if role == "Manager":
                     sorted(list(set(completed["task"].dropna().tolist())))
                 )
                 marks = st.slider("Final Score (0–5)", 0.0, 5.0, 4.0)
-                fb = st.text_area("Feedback")
+                fb = st.text_area("Manager Feedback")
                 if st.button("Finalize Review"):
                     rec = completed[completed["task"] == sel].iloc[0].to_dict()
                     rec["marks"] = marks
                     rec["manager_feedback"] = fb
                     rec["status"] = "Under Client Review"
                     rec["manager_reviewed_on"] = now()
-                    upsert_data(rec.get("_id", str(uuid.uuid4())), rec)
+                    existing_id = rec.get("_id") or find_existing_record(fetch_all(), "Task", rec.get("employee",""), rec.get("task",""))
+                    tid = existing_id or str(uuid.uuid4())
+                    upsert_data(tid, rec)
                     st.success("Feedback finalized and sent for client review.")
-
-    # ---------------- Meetings ----------------
-    with tabs[2]:
-        st.subheader("Meeting Scheduler")
-        with st.form("schedule_meet"):
-            title = st.text_input("Meeting Title")
-            date_meet = st.date_input("Date", date.today())
-            time_meet = st.text_input("Time", "10:00 AM")
-            attendees = st.text_area("Attendees (comma-separated)")
-            submit = st.form_submit_button("Schedule Meeting")
-            if submit:
-                mid = str(uuid.uuid4())
-                md = {
-                    "type": "Meeting", "meeting_title": title,
-                    "meeting_date": str(date_meet),
-                    "meeting_time": time_meet,
-                    "attendees": json.dumps([a.strip() for a in attendees.split(",") if a.strip()]),
-                    "created": now()
-                }
-                upsert_data(mid, md)
-                st.success(f"Meeting '{title}' scheduled successfully.")
 
     # ---------------- Leave Approvals ----------------
     with tabs[3]:
@@ -280,53 +261,32 @@ if role == "Manager":
         else:
             if "status" not in leaves.columns:
                 leaves["status"] = ""
-            for i, r in leaves.iterrows():
-                status_val = str(r.get("status", "")).strip().lower()
-                if status_val == "pending":
-                    emp = r.get("employee", "Unknown")
-                    lt = r.get("leave_type", "Leave")
-                    from_d = r.get("from", "-")
-                    to_d = r.get("to", "-")
-                    reason = r.get("reason", "-")
+            pending_leaves = leaves[leaves["status"].astype(str).str.lower() == "pending"]
+            if pending_leaves.empty:
+                st.success("All leave requests processed.")
+            else:
+                for i, row in pending_leaves.iterrows():
+                    emp = row.get("employee", "Unknown")
+                    lt = row.get("leave_type", "Leave")
+                    from_d = row.get("from", "-")
+                    to_d = row.get("to", "-")
+                    reason = row.get("reason", "-")
                     st.markdown(f"**{emp}** requested **{lt}** leave ({from_d} → {to_d})")
                     st.write(f"Reason: {reason}")
                     decision = st.radio(f"Decision for {emp}", ["Approve", "Reject"], key=f"dec_{i}")
                     if st.button(f"Finalize Decision for {emp}", key=f"btn_{i}"):
-                        row = r.to_dict()
-                        row["status"] = "Approved" if decision == "Approve" else "Rejected"
-                        row["approved_by"] = "Manager"
-                        row["approved_on"] = now()
-                        row_id = row.get("_id", str(uuid.uuid4()))
-                        success = upsert_data(row_id, row)
+                        rec = row.to_dict()
+                        rec["status"] = "Approved" if decision == "Approve" else "Rejected"
+                        rec["approved_by"] = "Manager"
+                        rec["approved_on"] = now()
+                        audit_entry = f"Leave {decision} by Manager on {now()}"
+                        rec["audit_log"] = rec.get("audit_log","") + "\n" + audit_entry
+                        row_id = rec.get("_id", str(uuid.uuid4()))
+                        success = upsert_data(row_id, rec)
                         if success:
-                            st.success(f"Leave {row['status']} for {emp}")
+                            st.success(f"Leave {rec['status']} for {emp}")
+                            time.sleep(1)
                             st.experimental_rerun()
-
-    # ---------------- Team Overview ----------------
-    with tabs[4]:
-        st.subheader("Team Overview")
-        df = fetch_all()
-        tasks = df[df["type"] == "Task"] if not df.empty else pd.DataFrame()
-        if not tasks.empty:
-            fig = px.bar(tasks, x="employee", y="completion", color="department", title="Task Completion by Employee")
-            st.plotly_chart(fig, use_container_width=True)
-
-    # ---------------- AI Insights ----------------
-    with tabs[5]:
-        st.subheader("AI Insights")
-        df_all = fetch_all()
-        if not df_all.empty:
-            q = st.text_input("Ask AI a question (e.g., Who is underperforming?)")
-            if st.button("Generate Insight"):
-                if HF_AVAILABLE and HF_TOKEN:
-                    try:
-                        summary = df_all.describe(include="all").to_dict()
-                        prompt = f"You are an HR analyst. Dataset summary:\n{summary}\nQuestion: {q}\nProvide concise, actionable insights."
-                        st.write(hf_generate(prompt))
-                    except Exception as e:
-                        st.error(f"AI query failed: {e}")
-                else:
-                    st.warning("Hugging Face token not configured.")
 
 # ============================================================
 # TEAM MEMBER DASHBOARD
@@ -338,17 +298,31 @@ elif role == "Team Member":
         df = fetch_all()
         if not df.empty:
             my = df[(df["type"] == "Task") & (df["employee"].str.lower() == name.lower())]
-            for _, r in my.iterrows():
-                st.markdown(f"**{r['task']}** — {r['status']}")
-                val = st.slider("Progress %", 0, 100, int(float(r["completion"])), key=r["_id"])
-                if st.button(f"Update {r['task']}", key=f"upd_{r['_id']}"):
-                    r = r.to_dict()
-                    r["completion"] = val
-                    r["marks"] = float(lin_reg.predict([[val]])[0])
-                    r["status"] = "In Progress" if val < 100 else "Completed"
-                    upsert_data(r["_id"], r)
-                    st.success("Progress updated successfully.")
-                    st.experimental_rerun()
+            st.subheader("My Tasks")
+            if my.empty:
+                st.info("No tasks assigned.")
+            else:
+                for _, r in my.iterrows():
+                    task_title = r.get("task", "Untitled Task")
+                    status = r.get("status", "Unknown")
+                    st.markdown(f"**{task_title}** — Status: {status}")
+                    manager_fb = r.get("manager_feedback", "")
+                    client_fb = r.get("client_feedback", "")
+                    client_rating = r.get("client_rating", "")
+                    if manager_fb:
+                        st.info(f"Manager Feedback: {manager_fb}")
+                    if client_fb:
+                        st.success(f"Client Feedback: {client_fb} (Rating: {client_rating}/5)")
+                    curr = int(float(r.get("completion", 0) or 0))
+                    comp = st.slider("Completion %", 0, 100, curr, key=r.get("_id"))
+                    if st.button(f"Update {task_title}", key=f"upd_{r.get('_id')}"):
+                        r = r.to_dict()
+                        r["completion"] = comp
+                        r["marks"] = float(lin_reg.predict([[comp]])[0])
+                        r["status"] = "In Progress" if comp < 100 else "Completed"
+                        upsert_data(r.get("_id"), r)
+                        st.success("Progress updated successfully.")
+                        st.experimental_rerun()
 
 # ============================================================
 # CLIENT DASHBOARD
@@ -358,10 +332,31 @@ elif role == "Client":
     company = st.text_input("Enter Company Name")
     if company:
         df = fetch_all()
-        df_client = df[df["company"].str.lower() == company.lower()] if not df.empty else pd.DataFrame()
+        df_client = df[df["company"].astype(str).str.lower() == company.lower()] if not df.empty else pd.DataFrame()
         if not df_client.empty:
             df_tasks = df_client[df_client["type"] == "Task"]
             st.dataframe(df_tasks[["employee","task","status","completion","marks"]], use_container_width=True)
+            st.markdown("---")
+            st.subheader("Provide Feedback for Completed Tasks")
+            pending_review = df_tasks[(df_tasks["status"] == "Under Client Review") & (df_tasks.get("client_reviewed") != True)]
+            if pending_review.empty:
+                st.info("No tasks pending for your review.")
+            else:
+                task_sel = st.selectbox("Select Task for Feedback", sorted(pending_review["task"].dropna().unique().tolist()))
+                fb = st.text_area("Client Feedback")
+                rating = st.slider("Rating (1–5)", 1, 5, 3)
+                if st.button("Submit Client Feedback"):
+                    row = pending_review[pending_review["task"] == task_sel].iloc[0].to_dict()
+                    row["client_feedback"] = fb
+                    row["client_rating"] = rating
+                    row["client_reviewed"] = True
+                    row["client_reviewed_on"] = now()
+                    row["status"] = "Client Reviewed"
+                    row_id = row.get("_id", str(uuid.uuid4()))
+                    success = upsert_data(row_id, row)
+                    if success:
+                        st.success(f"Feedback submitted for '{task_sel}'.")
+                        st.experimental_rerun()
 
 # ============================================================
 # HR ADMIN DASHBOARD
