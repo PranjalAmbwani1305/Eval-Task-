@@ -1,5 +1,5 @@
 # ============================================================
-# main.py — Enterprise Workforce Intelligence System (AI + Client Review Fixed)
+# main.py — Enterprise Workforce Intelligence System (AI + Pinecone Persistent Save Fixed)
 # ============================================================
 # ✅ Requirements:
 # pip install streamlit pinecone-client scikit-learn plotly pandas openpyxl PyPDF2
@@ -65,40 +65,53 @@ def rand_vec():
     np.random.seed(int(time.time()) % 10000)
     return np.random.rand(DIMENSION).tolist()
 
+# --- UNIVERSAL SAFE META ---
 def safe_meta(md):
+    """Ensure metadata is 100% Pinecone-safe JSON."""
     if isinstance(md, pd.Series):
         md = md.to_dict()
+
     clean = {}
     for k, v in (md or {}).items():
         try:
             if isinstance(v, (np.generic,)):
-                v = np.asscalar(v)
+                v = v.item()
             if isinstance(v, (datetime, date)):
-                clean[k] = v.isoformat()
-            elif isinstance(v, (dict, list)):
-                clean[k] = json.dumps(v)
-            elif pd.isna(v):
-                clean[k] = ""
-            else:
-                clean[k] = str(v)
+                v = v.isoformat()
+            if isinstance(v, (dict, list)):
+                v = json.dumps(v)
+            if v is None or (isinstance(v, float) and np.isnan(v)):
+                v = ""
+            clean[str(k)] = str(v)
         except Exception:
-            clean[k] = str(v)
+            clean[str(k)] = str(v)
     return clean
 
+# --- UNIVERSAL SAFE UPSERT ---
 def upsert_data(id_, md):
+    """Safely upsert to Pinecone or local cache."""
     id_ = str(id_)
+    payload = safe_meta(md)
+
     if not index:
         local = st.session_state.setdefault("LOCAL_DATA", {})
-        local[id_] = md
+        local[id_] = payload
         return True
+
     try:
-        index.upsert(vectors=[{"id": id_, "values": rand_vec(), "metadata": safe_meta(md)}])
+        index.upsert(vectors=[{
+            "id": id_,
+            "values": rand_vec(),
+            "metadata": payload
+        }])
+        time.sleep(0.5)  # ensure consistency
         return True
     except Exception as e:
-        st.warning(f"Pinecone upsert failed: {e}")
+        st.error(f"❌ Pinecone upsert failed: {e}")
         return False
 
 def fetch_all():
+    """Fetch all metadata from Pinecone or local."""
     if not index:
         local = st.session_state.get("LOCAL_DATA", {})
         if not local:
@@ -172,7 +185,7 @@ role = st.sidebar.selectbox("Access Portal As", ["Manager", "Team Member", "Clie
 # ============================================================
 if role == "Manager":
     st.header("Manager Dashboard — Tasks & Team Oversight")
-    tabs = st.tabs(["Task Management", "Feedback", "Meetings", "Leave Approvals", "Team Overview"])
+    tabs = st.tabs(["Task Management", "Feedback", "Leave Approvals", "Team Overview"])
 
     # --- Task Management ---
     with tabs[0]:
@@ -209,35 +222,47 @@ if role == "Manager":
     with tabs[1]:
         st.subheader("Manager Feedback & Evaluation")
         df = fetch_all()
-        if not df.empty:
-            df_tasks = df[df["type"] == "Task"]
-            df_tasks["completion"] = pd.to_numeric(df_tasks["completion"], errors="coerce").fillna(0)
-            completed = df_tasks[df_tasks["completion"] >= 100]
 
-            emp_search = st.text_input("Search by employee name (optional)")
-            if emp_search:
-                emp_search_clean = emp_search.strip().lower()
-                completed = completed[completed["employee"].astype(str).str.lower().str.contains(emp_search_clean, na=False)]
+        if df.empty or "type" not in df.columns:
+            st.info("No data available.")
+        else:
+            df_tasks = df[df["type"] == "Task"].copy()
+            df_tasks["completion"] = pd.to_numeric(df_tasks["completion"], errors="coerce").fillna(0)
+            completed = df_tasks[df_tasks["completion"] >= 100].copy()
+
+            # Search by employee or task
+            search_query = st.text_input("Search by employee name or task title (optional)", value="")
+            if search_query:
+                q = search_query.strip().lower()
+                completed = completed[
+                    completed["employee"].astype(str).str.lower().str.contains(q, na=False)
+                    | completed["task"].astype(str).str.lower().str.contains(q, na=False)
+                ]
 
             if completed.empty:
                 st.info("No matching completed tasks.")
             else:
                 sel = st.selectbox("Select completed task", completed["task"].unique())
-                marks = st.slider("Final Performance Score (0–5)", 0.0, 5.0, 4.0)
-                fb = st.text_area("Manager Feedback")
+                rec = completed[completed["task"] == sel].iloc[0].to_dict()
+
+                st.markdown(f"**Employee:** {rec.get('employee','')}  |  **Company:** {rec.get('company','')}")
+                marks = st.slider("Final Performance Score (0–5)", 0.0, 5.0, float(rec.get("marks", 0)))
+                fb = st.text_area("Manager Feedback", value=rec.get("manager_feedback", ""))
+
                 if st.button("Finalize Review"):
-                    rec = completed[completed["task"] == sel].iloc[0].to_dict()
-                    rec.update({
-                        "marks": marks,
-                        "manager_feedback": fb,
-                        "status": "Under Client Review",
-                        "manager_reviewed_on": now(),
-                    })
-                    upsert_data(rec.get("_id", str(uuid.uuid4())), rec)
-                    st.success("Feedback sent for client review.")
+                    rec["marks"] = float(marks)
+                    rec["manager_feedback"] = str(fb)
+                    rec["status"] = "Under Client Review"
+                    rec["manager_reviewed_on"] = now()
+                    md = safe_meta(rec)
+                    md["_id"] = str(rec.get("_id") or uuid.uuid4())
+                    if upsert_data(md["_id"], md):
+                        st.success("✅ Feedback saved to Pinecone.")
+                        st.session_state["_refresh_trigger"] = str(uuid.uuid4())
+                        st.experimental_set_query_params(refresh=st.session_state["_refresh_trigger"])
 
     # --- Leave Approvals ---
-    with tabs[3]:
+    with tabs[2]:
         st.subheader("Leave Approvals")
         df = fetch_all()
         leaves = df[df["type"] == "Leave"] if not df.empty else pd.DataFrame()
@@ -252,7 +277,7 @@ if role == "Manager":
                 if st.button("Submit", key=f"btn_{i}"):
                     r["status"] = "Approved" if dec == "Approve" else "Rejected"
                     r["approved_on"] = now()
-                    upsert_data(r["_id"], r)
+                    upsert_data(str(r.get("_id", uuid.uuid4())), r)
                     st.success(f"Leave {r['status']} for {emp}")
                     st.session_state["_refresh_trigger"] = str(uuid.uuid4())
                     st.experimental_set_query_params(refresh=st.session_state["_refresh_trigger"])
@@ -273,7 +298,10 @@ elif role == "Client":
 
             st.markdown("---")
             st.subheader("Review Completed or Near-Completed Tasks")
-            reviewable = df_tasks[(df_tasks["status"].isin(["Under Client Review", "Completed"])) | (pd.to_numeric(df_tasks["completion"], errors="coerce") >= 90)]
+            reviewable = df_tasks[
+                (df_tasks["status"].isin(["Under Client Review", "Completed"]))
+                | (pd.to_numeric(df_tasks["completion"], errors="coerce") >= 90)
+            ]
             if reviewable.empty:
                 st.info("No reviewable tasks.")
             else:
@@ -282,14 +310,12 @@ elif role == "Client":
                 rating = st.slider("Client Rating (1–5)", 1, 5, 4)
                 if st.button("Submit Feedback"):
                     rec = reviewable[reviewable["task"] == sel].iloc[0].to_dict()
-                    rec.update({
-                        "client_feedback": fb,
-                        "client_rating": rating,
-                        "client_reviewed": True,
-                        "status": "Client Approved",
-                        "client_reviewed_on": now(),
-                    })
-                    upsert_data(rec.get("_id", str(uuid.uuid4())), rec)
+                    rec["client_feedback"] = fb
+                    rec["client_rating"] = rating
+                    rec["client_reviewed"] = True
+                    rec["status"] = "Client Approved"
+                    rec["client_reviewed_on"] = now()
+                    upsert_data(str(rec.get("_id", uuid.uuid4())), rec)
                     st.success("✅ Feedback submitted successfully.")
 
 # ============================================================
@@ -309,10 +335,8 @@ elif role == "Team Member":
                     r["completion"] = val
                     r["marks"] = float(lin_reg.predict([[val]])[0])
                     r["status"] = "In Progress" if val < 100 else "Completed"
-                    upsert_data(r["_id"], r)
+                    upsert_data(str(r.get("_id", uuid.uuid4())), r)
                     st.success("Updated successfully.")
-                    st.session_state["_refresh_trigger"] = str(uuid.uuid4())
-                    st.experimental_set_query_params(refresh=st.session_state["_refresh_trigger"])
 
             st.markdown("---")
             st.subheader("Apply for Leave")
