@@ -1,19 +1,19 @@
-# ============================================================
-# main.py — Enterprise Workforce Performance Intelligence System ⚙️
-# ============================================================
-# ✅ Requirements:
-# pip install streamlit pinecone pandas scikit-learn plotly openpyxl PyPDF2 tqdm huggingface-hub
+# main.py — Enterprise Workforce Performance Intelligence System (Final)
+# Requirements:
+# pip install streamlit pinecone-client pandas scikit-learn plotly openpyxl PyPDF2 huggingface-hub tqdm
 
 import streamlit as st
 import pandas as pd
 import numpy as np
-import json, uuid, time
+import json
+import uuid
+import time
 from datetime import datetime, date
 from sklearn.linear_model import LinearRegression
 from sklearn.cluster import KMeans
 import plotly.express as px
 
-# --- Optional modules ---
+# Optional Modules
 try:
     from pinecone import Pinecone, ServerlessSpec
     PINECONE_AVAILABLE = True
@@ -33,42 +33,19 @@ except Exception:
     PDF_AVAILABLE = False
 
 # ============================================================
-# Streamlit UI Config
+# Streamlit Configuration
 # ============================================================
-st.set_page_config(page_title="Enterprise Workforce Performance Intelligence System ⚙️", layout="wide")
-st.title("🏢 Enterprise Workforce Performance Intelligence System")
+st.set_page_config(page_title="Enterprise Workforce Performance Intelligence", layout="wide")
+st.title("Enterprise Workforce Performance Intelligence System")
 st.caption("AI-Driven Insights • Performance Analytics • Organizational Intelligence")
 
-st.markdown("""
-<div style='background-color:#f0f4ff;padding:10px;border-radius:10px;margin-top:10px;'>
-<h4 style='color:#1a1a1a;margin:0;'>A next-generation platform integrating workforce analytics, HR intelligence, and AI-driven recommendations to enhance productivity and decision-making.</h4>
-</div>
-""", unsafe_allow_html=True)
-
 # ============================================================
-# API Keys / Constants
+# Constants and Secrets
 # ============================================================
 PINECONE_API_KEY = st.secrets.get("PINECONE_API_KEY", "")
 HF_TOKEN = st.secrets.get("HUGGINGFACEHUB_API_TOKEN", "")
 INDEX_NAME = "task"
-DIMENSION = 1024  # demo dimension
-
-# ============================================================
-# Pinecone Setup
-# ============================================================
-pc, index = None, None
-if PINECONE_AVAILABLE and PINECONE_API_KEY:
-    try:
-        pc = Pinecone(api_key=PINECONE_API_KEY)
-        existing = [i["name"] for i in pc.list_indexes()]
-        if INDEX_NAME not in existing:
-            INDEX_NAME = existing[0]
-        index = pc.Index(INDEX_NAME)
-        st.caption(f"✅ Connected to Pinecone index: {INDEX_NAME}")
-    except Exception as e:
-        st.warning(f"Pinecone connection failed — running in local mode. ({e})")
-else:
-    st.warning("Pinecone API key not detected — operating in local data mode.")
+DIMENSION = 1024
 
 # ============================================================
 # Utility Functions
@@ -96,19 +73,58 @@ def safe_meta(md: dict) -> dict:
             clean[k] = str(v)
     return clean
 
+# ============================================================
+# Pinecone Initialization
+# ============================================================
+pc, index = None, None
+if PINECONE_AVAILABLE and PINECONE_API_KEY:
+    try:
+        pc = Pinecone(api_key=PINECONE_API_KEY)
+        existing = [i["name"] for i in pc.list_indexes()]
+        if INDEX_NAME not in existing:
+            st.info(f"Creating Pinecone index '{INDEX_NAME}'...")
+            pc.create_index(
+                name=INDEX_NAME,
+                dimension=DIMENSION,
+                metric="cosine",
+                spec=ServerlessSpec(cloud="aws", region="us-east-1"),
+            )
+            # Wait until ready
+            for _ in range(30):
+                try:
+                    desc = pc.describe_index(INDEX_NAME)
+                    if desc.get("status", {}).get("ready"):
+                        break
+                except Exception:
+                    time.sleep(1)
+        index = pc.Index(INDEX_NAME)
+        st.success(f"Connected to Pinecone index: {INDEX_NAME}")
+    except Exception as e:
+        st.warning(f"Pinecone connection failed — running in local mode. ({e})")
+else:
+    st.warning("Pinecone API key not configured or library missing — operating in local mode.")
+
+if "LOCAL_DATA" not in st.session_state:
+    st.session_state["LOCAL_DATA"] = {}
+
+# ============================================================
+# Data Functions
+# ============================================================
 def upsert_data(id_, md: dict):
     id_ = str(id_)
+    md = safe_meta(md)
     if not index:
         local = st.session_state.setdefault("LOCAL_DATA", {})
         local[id_] = md
         return True
     try:
-        index.upsert(vectors=[{"id": id_, "values": rand_vec(), "metadata": safe_meta(md)}])
+        index.upsert([{"id": id_, "values": rand_vec(), "metadata": md}])
         return True
     except Exception as e:
         st.warning(f"Pinecone upsert failed: {e}")
         return False
 
+@st.cache_data(ttl=60)
 def fetch_all() -> pd.DataFrame:
     if not index:
         local = st.session_state.get("LOCAL_DATA", {})
@@ -120,10 +136,16 @@ def fetch_all() -> pd.DataFrame:
         if stats.get("total_vector_count", 0) == 0:
             return pd.DataFrame()
         res = index.query(vector=rand_vec(), top_k=1000, include_metadata=True)
+        matches = getattr(res, "matches", []) or res.get("matches", [])
         rows = []
-        for m in res["matches"]:
-            md = m["metadata"]
-            md["_id"] = m["id"]
+        for m in matches:
+            if hasattr(m, "metadata"):
+                md = m.metadata or {}
+                mid = getattr(m, "id", None)
+            else:
+                md = m.get("metadata", {})
+                mid = m.get("id")
+            md["_id"] = mid
             rows.append(md)
         return pd.DataFrame(rows)
     except Exception as e:
@@ -144,21 +166,40 @@ def parse_attendees_field(val):
     return []
 
 # ============================================================
+# Hugging Face Safe Wrapper
+# ============================================================
+def hf_generate(prompt: str, model="microsoft/Phi-3-mini-4k-instruct", max_new_tokens=200):
+    if not HF_AVAILABLE or not HF_TOKEN:
+        raise RuntimeError("Hugging Face client or token not available")
+    client = InferenceClient(token=HF_TOKEN)
+    try:
+        res = client.text_generation(model=model, inputs=prompt, max_new_tokens=max_new_tokens)
+        if isinstance(res, dict):
+            return res.get("generated_text") or res.get("output") or json.dumps(res)
+        if isinstance(res, list) and res and isinstance(res[0], dict):
+            return res[0].get("generated_text") or res[0].get("output") or json.dumps(res[0])
+        return str(res)
+    except Exception as e:
+        raise RuntimeError(f"Hugging Face generation failed: {e}")
+
+# ============================================================
 # ML Helper
 # ============================================================
 lin_reg = LinearRegression().fit([[0], [50], [100]], [0, 2.5, 5])
 
 # ============================================================
-# Role-based Views
+# Role Selection
 # ============================================================
-role = st.sidebar.selectbox("Access Portal As", ["Manager", "Team Member", "Client", "HR Administrator"])
+role = st.sidebar.selectbox("Login as", ["Manager", "Team Member", "Client", "HR Administrator"])
 
-# ---------------- MANAGER ----------------
+# ============================================================
+# MANAGER
+# ============================================================
 if role == "Manager":
-    st.header("👨‍💼 Manager Command Center — Task & Team Oversight")
-    tabs = st.tabs(["Task Management", "Feedback", "Meetings", "Leave Decisions", "Team Overview", "Cognitive Insights"])
+    st.header("Manager Dashboard")
+    tabs = st.tabs(["Task Management", "Feedback", "Meetings", "Leave Approvals", "Team Overview", "AI Insights"])
 
-    # Task Assignment
+    # Task Management
     with tabs[0]:
         st.subheader("Assign New Task")
         with st.form("assign_task"):
@@ -166,7 +207,7 @@ if role == "Manager":
             dept = st.text_input("Department")
             emp = st.text_input("Employee Name")
             task = st.text_input("Task Title")
-            desc = st.text_area("Task Description")
+            desc = st.text_area("Description")
             deadline = st.date_input("Deadline", value=date.today())
             submit = st.form_submit_button("Assign Task")
             if submit and emp and task:
@@ -178,7 +219,7 @@ if role == "Manager":
                     "status": "Assigned", "created": now()
                 }
                 upsert_data(tid, md)
-                st.success(f"✅ Task '{task}' assigned to {emp}")
+                st.success(f"Task '{task}' assigned to {emp}")
 
         df = fetch_all()
         if not df.empty:
@@ -188,15 +229,15 @@ if role == "Manager":
 
     # Feedback
     with tabs[1]:
-        st.subheader("Manager Feedback & Evaluation")
+        st.subheader("Manager Feedback")
         df = fetch_all()
         if not df.empty:
             df_tasks = df[df.get("type") == "Task"]
             completed = df_tasks[df_tasks["completion"].astype(float) >= 100]
             if not completed.empty:
-                sel = st.selectbox("Select completed task", completed["task"].unique())
-                marks = st.slider("Final Performance Score (0–5)", 0.0, 5.0, 4.0)
-                fb = st.text_area("Manager Feedback")
+                sel = st.selectbox("Select Completed Task", completed["task"].unique())
+                marks = st.slider("Final Score (0–5)", 0.0, 5.0, 4.0)
+                fb = st.text_area("Feedback")
                 if st.button("Finalize Review"):
                     rec = completed[completed["task"] == sel].iloc[0].to_dict()
                     rec["marks"] = marks
@@ -204,11 +245,11 @@ if role == "Manager":
                     rec["status"] = "Under Client Review"
                     rec["manager_reviewed_on"] = now()
                     upsert_data(rec["_id"] if "_id" in rec else uuid.uuid4(), rec)
-                    st.success("✅ Feedback finalized and sent for client evaluation.")
+                    st.success("Feedback finalized and sent for client review.")
 
     # Meetings
     with tabs[2]:
-        st.subheader("Meeting Scheduler & Notes")
+        st.subheader("Meeting Scheduler")
         with st.form("schedule_meet"):
             title = st.text_input("Meeting Title")
             date_meet = st.date_input("Date", date.today())
@@ -222,11 +263,11 @@ if role == "Manager":
                     "meeting_time": time_meet, "attendees": json.dumps(parse_attendees_field(attendees)), "created": now()
                 }
                 upsert_data(mid, md)
-                st.success(f"✅ Meeting '{title}' successfully scheduled.")
+                st.success(f"Meeting '{title}' scheduled.")
 
     # Leave Approvals
     with tabs[3]:
-        st.subheader("Leave Decision Center")
+        st.subheader("Leave Approvals")
         df = fetch_all()
         leaves = df[df["type"] == "Leave"] if not df.empty else pd.DataFrame()
         if leaves.empty:
@@ -235,7 +276,7 @@ if role == "Manager":
             for i, r in leaves.iterrows():
                 if r.get("status") == "Pending":
                     emp = r.get("employee")
-                    st.markdown(f"**{emp}** → {r.get('from')} to {r.get('to')} ({r.get('reason')})")
+                    st.markdown(f"**{emp}** — {r.get('from')} to {r.get('to')} ({r.get('reason')})")
                     dec = st.radio(f"Decision for {emp}", ["Approve", "Reject"], key=f"dec_{i}")
                     if st.button(f"Submit Decision for {emp}", key=f"btn_{i}"):
                         r["status"] = "Approved" if dec == "Approve" else "Rejected"
@@ -245,44 +286,38 @@ if role == "Manager":
 
     # Team Overview
     with tabs[4]:
-        st.subheader("Team Overview — Task Performance Snapshot")
+        st.subheader("Team Overview")
         df = fetch_all()
         tasks = df[df["type"] == "Task"] if not df.empty else pd.DataFrame()
-        if tasks.empty:
-            st.info("No task data available.")
-        else:
+        if not tasks.empty:
             fig = px.bar(tasks, x="employee", y="completion", color="department", title="Task Completion by Employee")
             st.plotly_chart(fig, use_container_width=True)
 
     # AI Insights
     with tabs[5]:
-        st.subheader("Cognitive Insights — Workforce Analytics")
+        st.subheader("AI Insights")
         df_all = fetch_all()
-        if df_all.empty:
-            st.info("No data available for insights.")
-        else:
-            q = st.text_input("Ask AI (e.g., 'Who is underperforming this week?')")
+        if not df_all.empty:
+            q = st.text_input("Ask AI (e.g., 'Which employee has the most tasks pending?')")
             if st.button("Generate Insight"):
                 if HF_AVAILABLE and HF_TOKEN:
                     try:
                         client = InferenceClient(token=HF_TOKEN)
                         summary = df_all.describe(include="all").to_dict()
-                        prompt = f"You are an HR data analyst. Dataset summary:\n{summary}\nQuestion: {q}\nProvide concise insights."
-                        res = client.text_generation(
-                            model="microsoft/Phi-3-mini-4k-instruct",
-                            inputs=prompt,
-                            max_new_tokens=200
-                        )
-                        st.write(res)
+                        prompt = f"You are an HR analyst. Dataset summary:\n{summary}\nQuestion: {q}\nProvide clear insights."
+                        out = hf_generate(prompt=prompt, max_new_tokens=250)
+                        st.write(out)
                     except Exception as e:
                         st.error(f"AI query failed: {e}")
                 else:
-                    st.warning("⚠️ Hugging Face token not configured — add your token in Streamlit secrets.")
+                    st.warning("Hugging Face not configured.")
 
-# ---------------- TEAM MEMBER ----------------
+# ============================================================
+# TEAM MEMBER
+# ============================================================
 elif role == "Team Member":
-    st.header("🧑‍💻 Employee Workspace — Task Progress & Leave Requests")
-    name = st.text_input("Enter your name")
+    st.header("Team Member Dashboard")
+    name = st.text_input("Enter Your Name")
     if name:
         df = fetch_all()
         if not df.empty:
@@ -295,11 +330,13 @@ elif role == "Team Member":
                     r["marks"] = float(lin_reg.predict([[val]])[0])
                     r["status"] = "In Progress" if val < 100 else "Completed"
                     upsert_data(r["_id"], r)
-                    st.success("✅ Progress updated successfully.")
+                    st.success("Progress updated successfully.")
 
-# ---------------- CLIENT ----------------
+# ============================================================
+# CLIENT
+# ============================================================
 elif role == "Client":
-    st.header("🏢 Client Review Portal — Project Feedback & Meetings")
+    st.header("Client Dashboard")
     company = st.text_input("Enter Company Name")
     if company:
         df = fetch_all()
@@ -308,9 +345,11 @@ elif role == "Client":
             df_tasks = df_client[df_client["type"] == "Task"]
             st.dataframe(df_tasks[["employee","task","status","completion","marks"]], use_container_width=True)
 
-# ---------------- HR ADMIN ----------------
+# ============================================================
+# HR ADMIN
+# ============================================================
 elif role == "HR Administrator":
-    st.header("👩‍💼 HR Analytics — Performance & Leave Intelligence")
+    st.header("HR Administrator Dashboard")
     df = fetch_all()
     if not df.empty:
         tasks = df[df["type"] == "Task"]
