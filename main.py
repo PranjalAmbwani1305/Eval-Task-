@@ -1,5 +1,5 @@
 # ============================================================
-# main.py — Enterprise Workforce Intelligence System (Final Stable Build)
+# main.py — Enterprise Workforce Intelligence System (Final Stable Build v2)
 # ============================================================
 
 import streamlit as st
@@ -11,6 +11,7 @@ from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.cluster import KMeans
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.svm import SVC
+from sklearn.metrics.pairwise import cosine_similarity
 import plotly.express as px
 
 # ============================================================
@@ -23,7 +24,7 @@ except Exception:
     PINECONE_AVAILABLE = False
 
 st.set_page_config(page_title="Enterprise Workforce Intelligence System", layout="wide")
-st.title("SmartWorkAI")
+st.title("🏢 Enterprise Workforce Intelligence System")
 st.caption("AI-Driven Workforce Analytics • Productivity Intelligence • 360° Performance Overview")
 
 # ============================================================
@@ -48,7 +49,7 @@ else:
     st.warning("⚠️ Pinecone key missing — using local session storage.")
 
 # ============================================================
-# Utilities
+# Utility functions
 # ============================================================
 def now():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -130,17 +131,19 @@ if role == "Manager":
     df_all = fetch_all()
     tabs = st.tabs(["Task Management", "Feedback", "Leave Management", "Meeting Management", "360° Overview"])
 
-    # --- Task Assignment
+    # --- Task Management
     with tabs[0]:
+        st.subheader("Assign Task")
         with st.form("assign_task"):
             emp = st.text_input("Employee Name")
+            company = st.text_input("Company Name")
             dept = st.text_input("Department")
             task = st.text_input("Task Title")
             desc = st.text_area("Description")
             deadline = st.date_input("Deadline", value=date.today())
             if st.form_submit_button("Assign Task") and emp and task:
                 tid = str(uuid.uuid4())
-                md = {"type": "Task", "employee": emp, "department": dept, "task": task,
+                md = {"type": "Task", "employee": emp, "company": company, "department": dept, "task": task,
                       "description": desc, "deadline": str(deadline),
                       "completion": 0, "marks": 0, "status": "Assigned", "created": now()}
                 upsert_data(tid, md)
@@ -234,15 +237,39 @@ elif role == "Team Member":
         # --- Tasks
         with tabs_tm[0]:
             my = df_all[(df_all["type"] == "Task") & (df_all["employee"].str.lower() == name.lower())]
-            for _, t in my.iterrows():
-                st.markdown(f"**{t['task']}** — {t['status']}")
-                val = st.slider("Progress", 0, 100, int(float(t["completion"])), key=t["_id"])
-                if st.button(f"Update {t['task']}", key=f"u_{t['_id']}"):
-                    t["completion"] = val
-                    t["marks"] = float(lin_reg.predict([[val]])[0])
-                    t["status"] = "Completed" if val >= 100 else "In Progress"
-                    upsert_data(t["_id"], t)
-                    st.success("✅ Progress updated.")
+            if my.empty:
+                st.info("No assigned tasks.")
+            else:
+                for _, t in my.iterrows():
+                    st.markdown(f"**{t['task']}**")
+                    val = st.slider("Progress", 0, 100, int(float(t["completion"])), key=t["_id"])
+                    if st.button(f"Update {t['task']}", key=f"u_{t['_id']}"):
+                        t["completion"] = val
+                        t["marks"] = float(lin_reg.predict([[val]])[0])
+                        t["status"] = "Completed" if val >= 100 else "In Progress"
+                        upsert_data(t["_id"], t)
+                        st.success("✅ Progress updated.")
+
+        # --- Feedback (Manager + Client)
+        with tabs_tm[3]:
+            df_tasks = df_all[(df_all["type"] == "Task") & (df_all["employee"].str.lower() == name.lower())]
+            if df_tasks.empty:
+                st.info("No feedback yet.")
+            else:
+                for _, t in df_tasks.iterrows():
+                    st.markdown(f"### {t['task']}")
+                    mgr_fb = t.get("manager_feedback", "")
+                    client_fb = t.get("client_feedback", "")
+                    st.write(f"**Manager Feedback:** {mgr_fb if mgr_fb else 'N/A'}")
+                    if mgr_fb:
+                        s_vec = vectorizer.transform([mgr_fb])
+                        s = svm_clf.predict(s_vec)[0]
+                        st.write(f"Sentiment (Manager): {'😊 Positive' if s==1 else '😞 Negative'}")
+                    st.write(f"**Client Feedback:** {client_fb if client_fb else 'N/A'}")
+                    if client_fb:
+                        s_vec = vectorizer.transform([client_fb])
+                        s = svm_clf.predict(s_vec)[0]
+                        st.write(f"Sentiment (Client): {'😊 Positive' if s==1 else '😞 Negative'}")
 
         # --- Leave
         with tabs_tm[1]:
@@ -261,7 +288,10 @@ elif role == "Team Member":
 
             with leave_tabs[1]:
                 df = df_all[(df_all["type"] == "Leave") & (df_all["employee"].str.lower() == name.lower())]
-                st.dataframe(df[["leave_type", "from", "to", "reason", "status"]], use_container_width=True)
+                if df.empty:
+                    st.info("No leave history.")
+                else:
+                    st.dataframe(df[["leave_type", "from", "to", "reason", "status"]], use_container_width=True)
 
         # --- Meetings
         with tabs_tm[2]:
@@ -272,36 +302,41 @@ elif role == "Team Member":
             else:
                 st.dataframe(mine[["meeting_title", "meeting_date", "meeting_time", "attendees", "notes"]])
 
-        # --- Feedback
-        with tabs_tm[3]:
-            df_tasks = df_all[(df_all["type"] == "Task") & (df_all["employee"].str.lower() == name.lower())]
-            for _, t in df_tasks.iterrows():
-                st.markdown(f"### {t['task']}")
-                fb = t.get("manager_feedback", "")
-                st.write(f"Feedback: {fb if fb else 'N/A'}")
-                if fb:
-                    vec = vectorizer.transform([fb])
-                    sentiment = svm_clf.predict(vec)[0]
-                    st.markdown(f"Sentiment: {'😊 Positive' if sentiment==1 else '😞 Negative'}")
-
 # ============================================================
 # CLIENT
 # ============================================================
 elif role == "Client":
     st.header("🏢 Client Review Portal")
     df = fetch_all()
-    df = df[df["type"] == "Task"]
-    pending = df[df["status"] == "Under Client Review"]
-    for _, t in pending.iterrows():
-        fb = st.text_area(f"Client Feedback for {t['task']}", key=f"cf_{t['_id']}")
-        rating = st.slider("Rating", 1, 5, 3, key=f"rt_{t['_id']}")
-        if st.button(f"Submit Review ({t['task']})", key=f"sb_{t['_id']}"):
-            t["client_feedback"] = fb
-            t["client_rating"] = rating
-            t["status"] = "Client Approved" if rating >= 3 else "Client Requires Changes"
-            t["client_reviewed_on"] = now()
-            upsert_data(t["_id"], t)
-            st.success(f"✅ Review saved for {t['task']}")
+    company = st.text_input("Enter Company Name").strip().lower()
+    if company:
+        df_tasks = df[(df["type"] == "Task") & (df["company"].astype(str).str.lower() == company)]
+        pending = df_tasks[df_tasks["status"] == "Under Client Review"]
+        if pending.empty:
+            st.info("No tasks pending for review.")
+        else:
+            st.subheader("Review Completed Tasks")
+            for _, t in pending.iterrows():
+                fb = st.text_area(f"Client Feedback for {t['employee']} - {t['task']}", key=f"cf_{t['_id']}")
+                rating = st.slider("Rating (1–5)", 1, 5, 3, key=f"cr_{t['_id']}")
+                if st.button(f"Submit Review ({t['task']})", key=f"sb_{t['_id']}"):
+                    t["client_feedback"] = fb
+                    t["client_rating"] = rating
+                    t["status"] = "Client Approved" if rating >= 3 else "Client Requires Changes"
+                    t["client_reviewed_on"] = now()
+
+                    # Similarity check between client and manager feedback
+                    mfb = t.get("manager_feedback", "")
+                    if mfb and fb:
+                        try:
+                            vecs = vectorizer.transform([mfb, fb])
+                            sim = cosine_similarity(vecs)[0][1]
+                            t["feedback_similarity"] = round(float(sim), 2)
+                        except Exception:
+                            t["feedback_similarity"] = "N/A"
+
+                    upsert_data(t["_id"], t)
+                    st.success(f"✅ Review saved for {t['task']}")
 
 # ============================================================
 # HR ANALYTICS
@@ -309,31 +344,24 @@ elif role == "Client":
 elif role == "HR Administrator":
     st.header("👩‍💼 HR Analytics — Performance Insights")
     df = fetch_all()
-    tabs_hr = st.tabs(["Employee Stats", "Clusters", "Leaves"])
-
-    with tabs_hr[0]:
+    if df.empty:
+        st.info("No data available.")
+    else:
         tasks = df[df["type"] == "Task"]
         tasks["completion"] = pd.to_numeric(tasks["completion"], errors="coerce").fillna(0)
         tasks["marks"] = pd.to_numeric(tasks["marks"], errors="coerce").fillna(0)
-        by_emp = tasks.groupby("employee", dropna=True).agg({"completion": "mean", "marks": "mean"}).reset_index()
-        st.dataframe(by_emp, use_container_width=True)
-        fig = px.bar(by_emp, x="employee", y="completion", color="marks", title="Performance Stats")
-        st.plotly_chart(fig, use_container_width=True)
 
-    with tabs_hr[1]:
+        st.subheader("📈 Employee Performance Statistics & Clusters")
+
         if len(tasks) > 1:
             kmeans = KMeans(n_clusters=min(3, len(tasks)), n_init=10)
             tasks["cluster"] = kmeans.fit_predict(tasks[["completion", "marks"]])
-            fig2 = px.scatter(tasks, x="completion", y="marks", color="cluster", hover_data=["employee"], title="Performance Clusters")
-            st.plotly_chart(fig2, use_container_width=True)
-        else:
-            st.info("Not enough data for clustering.")
+            fig = px.scatter(tasks, x="completion", y="marks", color="cluster",
+                             hover_data=["employee", "task"], title="Employee Performance Clusters")
+            st.plotly_chart(fig, use_container_width=True)
 
-    with tabs_hr[2]:
-        leaves = df[df["type"] == "Leave"]
-        if not leaves.empty:
-            leaves["status"] = leaves["status"].fillna("Pending")
-            fig3 = px.histogram(leaves, x="status", title="Leave Overview")
-            st.plotly_chart(fig3, use_container_width=True)
-        else:
-            st.info("No leave data found.")
+        by_emp = tasks.groupby("employee", dropna=True).agg({"completion": "mean", "marks": "mean"}).reset_index()
+        st.dataframe(by_emp, use_container_width=True)
+        fig2 = px.bar(by_emp, x="employee", y="completion", color="marks",
+                      title="Average Completion & Marks by Employee")
+        st.plotly_chart(fig2, use_container_width=True)
