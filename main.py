@@ -1,5 +1,5 @@
 # ============================================================
-# main.py — Enterprise Workforce Intelligence System (Stable Final)
+# main.py — Enterprise Workforce Intelligence System (Safe Final)
 # ============================================================
 
 import streamlit as st
@@ -14,7 +14,7 @@ from sklearn.svm import SVC
 import plotly.express as px
 
 # ============================================================
-# Optional Pinecone setup
+# Pinecone setup
 # ============================================================
 try:
     from pinecone import Pinecone
@@ -22,15 +22,12 @@ try:
 except Exception:
     PINECONE_AVAILABLE = False
 
-# ============================================================
-# Streamlit setup
-# ============================================================
 st.set_page_config(page_title="Enterprise Workforce Intelligence System", layout="wide")
 st.title("🏢 Enterprise Workforce Intelligence System")
 st.caption("AI-Driven Workforce Analytics • Productivity Intelligence • 360° Performance Overview")
 
 # ============================================================
-# Pinecone config
+# Pinecone configuration
 # ============================================================
 PINECONE_API_KEY = st.secrets.get("PINECONE_API_KEY", "")
 INDEX_NAME = "task"
@@ -46,12 +43,12 @@ if PINECONE_AVAILABLE and PINECONE_API_KEY:
         index = pc.Index(INDEX_NAME)
         st.success(f"✅ Connected to Pinecone index: {INDEX_NAME}")
     except Exception as e:
-        st.warning(f"Pinecone connection failed — running in local mode. ({e})")
+        st.warning(f"Pinecone connection failed — running local mode. ({e})")
 else:
-    st.warning("⚠️ Pinecone key missing — using local session storage.")
+    st.warning("⚠️ Pinecone key missing — using local session data.")
 
 # ============================================================
-# Utility Functions
+# Utilities
 # ============================================================
 def now():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -61,7 +58,6 @@ def rand_vec():
     return np.random.rand(DIMENSION).tolist()
 
 def safe_meta(md):
-    """Normalize metadata before upsert."""
     if isinstance(md, pd.Series):
         md = md.to_dict()
     elif not isinstance(md, dict):
@@ -77,15 +73,12 @@ def safe_meta(md):
             elif pd.isna(v):
                 clean[str(k)] = ""
             else:
-                if isinstance(v, (np.generic,)):
-                    v = v.item()
                 clean[str(k)] = str(v)
         except Exception:
             clean[str(k)] = str(v)
     return clean
 
 def upsert_data(id_, md):
-    """Safely upsert to Pinecone or local storage."""
     id_ = str(id_)
     md_clean = safe_meta(md)
     if not index:
@@ -100,16 +93,9 @@ def upsert_data(id_, md):
         return False
 
 def fetch_all():
-    """Fetch all Pinecone data or from session."""
     if not index:
         local = st.session_state.get("LOCAL_DATA", {})
-        if not local:
-            return pd.DataFrame()
-        rows = []
-        for k, v in local.items():
-            rec = dict(v)
-            rec["_id"] = k
-            rows.append(rec)
+        rows = [{"_id": k, **v} for k, v in local.items()]
         return pd.DataFrame(rows)
     try:
         res = index.query(vector=rand_vec(), top_k=1000, include_metadata=True)
@@ -125,7 +111,7 @@ def fetch_all():
         return pd.DataFrame()
 
 # ============================================================
-# Machine Learning models
+# ML Models
 # ============================================================
 lin_reg = LinearRegression().fit([[0], [50], [100]], [0, 2.5, 5])
 log_reg = LogisticRegression().fit([[0], [50], [100]], [0, 1, 1])
@@ -137,7 +123,7 @@ X_train = vectorizer.fit_transform(train_texts)
 svm_clf = SVC(kernel="linear").fit(X_train, train_labels)
 
 # ============================================================
-# Role selector
+# Role selection
 # ============================================================
 role = st.sidebar.selectbox("Access As", ["Manager", "Team Member", "Client", "HR Administrator"])
 
@@ -145,21 +131,21 @@ role = st.sidebar.selectbox("Access As", ["Manager", "Team Member", "Client", "H
 # MANAGER DASHBOARD
 # ============================================================
 if role == "Manager":
-    st.header("👨‍💼 Manager Dashboard — Task, Leave, Feedback & Meetings")
+    st.header("👨‍💼 Manager Dashboard — Tasks, Feedback, Leave, Meetings & Overview")
     df_all = fetch_all()
     tabs = st.tabs(["Task Management", "Feedback", "Leave Management", "Meeting Management", "360° Overview"])
 
-    # ---------------- Task Management ----------------
+    # --- Task Management ---
     with tabs[0]:
-        st.subheader("Assign New Task")
+        st.subheader("Assign Task")
         with st.form("assign_task"):
             emp = st.text_input("Employee Name")
             dept = st.text_input("Department")
             task = st.text_input("Task Title")
-            desc = st.text_area("Description")
+            desc = st.text_area("Task Description")
             deadline = st.date_input("Deadline", value=date.today())
-            submit = st.form_submit_button("Assign Task")
-            if submit:
+            submit = st.form_submit_button("Assign")
+            if submit and emp and task:
                 tid = str(uuid.uuid4())
                 md = {
                     "type": "Task", "employee": emp, "department": dept, "task": task,
@@ -169,16 +155,16 @@ if role == "Manager":
                 upsert_data(tid, md)
                 st.success(f"✅ Task '{task}' assigned to {emp}")
 
-    # ---------------- Feedback ----------------
+    # --- Feedback ---
     with tabs[1]:
         st.subheader("Manager Feedback & Evaluation")
         df_all = fetch_all()
         if df_all.empty:
-            st.info("No data available.")
+            st.info("No tasks available.")
         else:
-            search = st.text_input("Search by Employee Name or Task Title").strip().lower()
+            search = st.text_input("Search by Employee or Task").strip().lower()
             if not search:
-                st.info("Enter a search term to see tasks.")
+                st.info("Enter a search term to display completed tasks.")
             else:
                 df_tasks = df_all[df_all["type"].astype(str).str.lower() == "task"]
                 df_tasks["completion"] = pd.to_numeric(df_tasks["completion"], errors="coerce").fillna(0)
@@ -190,12 +176,13 @@ if role == "Manager":
                 if completed.empty:
                     st.warning("No matching completed tasks.")
                 else:
+                    rerun_flag = False
                     for _, task in completed.iterrows():
                         emp = task["employee"]
                         st.markdown(f"### {emp} — {task['task']}")
                         marks = st.slider("Final Marks", 0.0, 5.0, float(task.get("marks", 0)), key=f"mark_{task['_id']}")
-                        fb = st.text_area("Feedback", task.get("manager_feedback", ""), key=f"fb_{task['_id']}")
-                        if st.button(f"Save Review for {emp}", key=f"btn_{task['_id']}"):
+                        fb = st.text_area("Manager Feedback", task.get("manager_feedback", ""), key=f"fb_{task['_id']}")
+                        if st.button(f"Save Feedback ({emp})", key=f"btn_{task['_id']}"):
                             updated = dict(task)
                             updated["marks"] = marks
                             updated["manager_feedback"] = fb
@@ -204,40 +191,45 @@ if role == "Manager":
                             ok = upsert_data(task["_id"], updated)
                             if ok:
                                 st.success(f"✅ Feedback saved for {emp}")
-                                time.sleep(0.5)
-                                st.experimental_rerun()
+                                rerun_flag = True
                             else:
                                 st.error("Save failed.")
+                    if rerun_flag:
+                        time.sleep(0.3)
+                        st.rerun()
 
-    # ---------------- Leave Management ----------------
+    # --- Leave Management ---
     with tabs[2]:
-        st.subheader("Leave Approval Center")
+        st.subheader("Leave Approvals")
         df_leave = df_all[df_all["type"].astype(str).str.lower() == "leave"]
         if df_leave.empty:
-            st.info("No leave requests.")
+            st.info("No leave data.")
         else:
-            query = st.text_input("Search by Employee Name").strip().lower()
-            if query:
-                matched = df_leave[df_leave["employee"].astype(str).str.lower().str.contains(query, na=False)]
+            search = st.text_input("Search by Employee").strip().lower()
+            if search:
+                matched = df_leave[df_leave["employee"].astype(str).str.lower().str.contains(search, na=False)]
                 pending = matched[matched["status"].astype(str).str.lower() == "pending"]
                 if pending.empty:
-                    st.success("✅ No pending leave requests.")
+                    st.info("No pending leaves.")
                 else:
+                    rerun_flag = False
                     for i, row in pending.iterrows():
-                        st.markdown(f"**{row['employee']}** → {row['from']} to {row['to']} — {row['reason']}")
+                        st.markdown(f"**{row['employee']}** — {row['from']} → {row['to']} — {row['reason']}")
                         dec = st.radio(f"Decision for {row['employee']}", ["Approve", "Reject"], key=f"dec_{i}", horizontal=True)
-                        if st.button(f"Submit Decision for {row['employee']}", key=f"btn_{i}"):
+                        if st.button(f"Submit Decision ({row['employee']})", key=f"btn_{i}"):
                             row["status"] = "Approved" if dec == "Approve" else "Rejected"
                             row["approved_on"] = now()
                             ok = upsert_data(row["_id"], row)
                             if ok:
                                 st.success(f"Leave {row['status']} for {row['employee']}")
-                                time.sleep(0.5)
-                                st.experimental_rerun()
+                                rerun_flag = True
+                    if rerun_flag:
+                        time.sleep(0.3)
+                        st.rerun()
 
-    # ---------------- Meeting Management ----------------
+    # --- Meetings ---
     with tabs[3]:
-        st.subheader("Meeting Scheduler")
+        st.subheader("Schedule Meetings")
         with st.form("schedule_meet"):
             title = st.text_input("Meeting Title")
             date_meet = st.date_input("Date", date.today())
@@ -254,41 +246,36 @@ if role == "Manager":
                 upsert_data(mid, md)
                 st.success("✅ Meeting scheduled.")
 
-    # ---------------- 360° Overview ----------------
+    # --- Overview ---
     with tabs[4]:
-        st.subheader("360° Overview")
-        df_all = fetch_all()
+        st.subheader("360° Team Overview")
         if df_all.empty:
-            st.info("No data available.")
+            st.info("No data found.")
         else:
             tasks = df_all[df_all["type"].astype(str).str.lower() == "task"]
             leaves = df_all[df_all["type"].astype(str).str.lower() == "leave"]
-            meets = df_all[df_all["type"].astype(str).str.lower() == "meeting"]
             c1, c2, c3 = st.columns(3)
             c1.metric("Tasks", len(tasks))
-            c2.metric("Meetings", len(meets))
-            c3.metric("Leaves", len(leaves))
+            c2.metric("Leaves", len(leaves))
+            c3.metric("Completion Avg", f"{tasks['completion'].astype(float).mean():.1f}%")
             if not tasks.empty:
-                tasks["completion"] = pd.to_numeric(tasks["completion"], errors="coerce").fillna(0)
                 fig = px.bar(tasks, x="employee", y="completion", color="status", title="Task Completion")
                 st.plotly_chart(fig, use_container_width=True)
-            if not leaves.empty:
-                fig2 = px.histogram(leaves, x="status", title="Leave Status")
-                st.plotly_chart(fig2, use_container_width=True)
 
 # ============================================================
 # TEAM MEMBER DASHBOARD
 # ============================================================
 elif role == "Team Member":
-    st.header("🧑‍💻 Team Member Dashboard — Tasks, Leaves, Meetings & Feedback")
+    st.header("🧑‍💻 Team Member Dashboard — Tasks, Leaves, Meetings, Feedback")
     name = st.text_input("Enter your name")
     if name:
         df_all = fetch_all()
         tabs_tm = st.tabs(["My Tasks", "My Leave", "My Meetings", "My Feedback"])
 
-        # Tasks
+        # --- Tasks ---
         with tabs_tm[0]:
             my_tasks = df_all[(df_all["type"] == "Task") & (df_all["employee"].str.lower() == name.lower())]
+            rerun_flag = False
             for _, r in my_tasks.iterrows():
                 st.markdown(f"**{r['task']}** — _{r['status']}_")
                 val = st.slider("Progress %", 0, 100, int(float(r["completion"])), key=r["_id"])
@@ -299,10 +286,12 @@ elif role == "Team Member":
                     ok = upsert_data(r["_id"], r)
                     if ok:
                         st.success("✅ Progress updated.")
-                        time.sleep(0.5)
-                        st.experimental_rerun()
+                        rerun_flag = True
+            if rerun_flag:
+                time.sleep(0.3)
+                st.rerun()
 
-        # Leaves
+        # --- Leaves ---
         with tabs_tm[1]:
             leave_tabs = st.tabs(["Apply Leave", "My Leave History"])
             with leave_tabs[0]:
@@ -319,8 +308,8 @@ elif role == "Team Member":
                     }
                     upsert_data(lid, md)
                     st.success("✅ Leave request submitted.")
-                    time.sleep(0.5)
-                    st.experimental_rerun()
+                    time.sleep(0.3)
+                    st.rerun()
 
             with leave_tabs[1]:
                 my_leaves = df_all[(df_all["type"] == "Leave") & (df_all["employee"].str.lower() == name.lower())]
@@ -329,20 +318,20 @@ elif role == "Team Member":
                 else:
                     st.dataframe(my_leaves[["leave_type", "from", "to", "reason", "status"]])
 
-        # Meetings
+        # --- Meetings ---
         with tabs_tm[2]:
             meets = df_all[df_all["type"] == "Meeting"]
             my_meets = meets[meets["attendees"].astype(str).str.lower().str.contains(name.lower(), na=False)]
             if my_meets.empty:
-                st.info("No meetings.")
+                st.info("No meetings found.")
             else:
                 st.dataframe(my_meets[["meeting_title", "meeting_date", "meeting_time", "attendees", "notes"]])
 
-        # Feedback
+        # --- Feedback ---
         with tabs_tm[3]:
             my_tasks = df_all[(df_all["type"] == "Task") & (df_all["employee"].str.lower() == name.lower())]
             if my_tasks.empty:
-                st.info("No feedback.")
+                st.info("No feedback yet.")
             else:
                 for _, t in my_tasks.iterrows():
                     st.markdown(f"### {t['task']}")
@@ -369,6 +358,7 @@ elif role == "Client":
         if pending.empty:
             st.info("No tasks pending client review.")
         else:
+            rerun_flag = False
             for _, t in pending.iterrows():
                 fb = st.text_area(f"Feedback for {t['task']}", key=f"cf_{t['_id']}")
                 rating = st.slider("Rating", 1, 5, 3, key=f"cr_{t['_id']}")
@@ -379,15 +369,17 @@ elif role == "Client":
                     t["client_reviewed_on"] = now()
                     ok = upsert_data(t["_id"], t)
                     if ok:
-                        st.success("✅ Client feedback submitted.")
-                        time.sleep(0.5)
-                        st.experimental_rerun()
+                        st.success("✅ Client feedback saved.")
+                        rerun_flag = True
+            if rerun_flag:
+                time.sleep(0.3)
+                st.rerun()
 
 # ============================================================
-# HR ADMIN DASHBOARD
+# HR DASHBOARD
 # ============================================================
 elif role == "HR Administrator":
-    st.header("👩‍💼 HR Analytics — Performance & Leave Insights")
+    st.header("👩‍💼 HR Analytics — Performance Insights")
     df_all = fetch_all()
     if df_all.empty:
         st.info("No records found.")
@@ -398,7 +390,7 @@ elif role == "HR Administrator":
             if not tasks.empty:
                 by_emp = tasks.groupby("employee").agg({"completion":"mean","marks":"mean"}).reset_index()
                 st.dataframe(by_emp)
-                fig = px.bar(by_emp, x="employee", y="completion", title="Avg Completion by Employee")
+                fig = px.bar(by_emp, x="employee", y="completion", title="Average Completion by Employee")
                 st.plotly_chart(fig)
         with tabs_hr[1]:
             tasks = df_all[df_all["type"] == "Task"]
@@ -412,6 +404,5 @@ elif role == "HR Administrator":
         with tabs_hr[2]:
             leaves = df_all[df_all["type"] == "Leave"]
             if not leaves.empty:
-                leaves["status"] = leaves["status"].astype(str).str.title()
                 fig3 = px.histogram(leaves, x="status", title="Leave Status Overview")
                 st.plotly_chart(fig3)
