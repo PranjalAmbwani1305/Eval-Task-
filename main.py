@@ -24,7 +24,7 @@ except Exception:
     PINECONE_AVAILABLE = False
 
 st.set_page_config(page_title="Enterprise Workforce Intelligence System", layout="wide")
-st.title("🏢 Enterprise Workforce Intelligence System")
+st.title("SmartWorkAI")
 st.caption("AI-Driven Workforce Analytics • Productivity Intelligence • 360° Performance Overview")
 
 # ============================================================
@@ -127,7 +127,7 @@ role = st.sidebar.selectbox("Access As", ["Manager", "Team Member", "Client", "H
 # MANAGER
 # ============================================================
 if role == "Manager":
-    st.header("👨‍💼 Manager Dashboard — Tasks, Feedback, Leave, Meetings, Overview")
+    st.header("Manager Dashboard — Tasks, Feedback, Leave, Meetings, Overview")
     df_all = fetch_all()
     tabs = st.tabs(["Task Management", "Feedback", "Leave Management", "Meeting Management", "360° Overview"])
 
@@ -147,7 +147,7 @@ if role == "Manager":
                       "description": desc, "deadline": str(deadline),
                       "completion": 0, "marks": 0, "status": "Assigned", "created": now()}
                 upsert_data(tid, md)
-                st.success(f"✅ Task '{task}' assigned to {emp}")
+                st.success(f"Task '{task}' assigned to {emp}")
 
     # --- Feedback
     with tabs[1]:
@@ -172,7 +172,7 @@ if role == "Manager":
                         task["status"] = "Under Client Review"
                         task["manager_reviewed_on"] = now()
                         upsert_data(task["_id"], task)
-                        st.success(f"✅ Feedback saved for {emp}")
+                        st.success(f"Feedback saved for {emp}")
 
     # --- Leave Management
     with tabs[2]:
@@ -208,7 +208,7 @@ if role == "Manager":
                 md = {"type": "Meeting", "meeting_title": title, "meeting_date": str(m_date),
                       "meeting_time": m_time, "attendees": attendees, "notes": notes, "created": now()}
                 upsert_data(mid, md)
-                st.success("✅ Meeting scheduled.")
+                st.success("Meeting scheduled.")
 
     # --- Overview
     with tabs[4]:
@@ -228,7 +228,7 @@ if role == "Manager":
 # TEAM MEMBER
 # ============================================================
 elif role == "Team Member":
-    st.header("🧑‍💻 Team Member Dashboard")
+    st.header("Team Member Dashboard")
     name = st.text_input("Enter Your Name")
     if name:
         df_all = fetch_all()
@@ -248,7 +248,7 @@ elif role == "Team Member":
                         t["marks"] = float(lin_reg.predict([[val]])[0])
                         t["status"] = "Completed" if val >= 100 else "In Progress"
                         upsert_data(t["_id"], t)
-                        st.success("✅ Progress updated.")
+                        st.success("Progress updated.")
 
         # --- Feedback (Manager + Client)
         with tabs_tm[3]:
@@ -264,12 +264,12 @@ elif role == "Team Member":
                     if mgr_fb:
                         s_vec = vectorizer.transform([mgr_fb])
                         s = svm_clf.predict(s_vec)[0]
-                        st.write(f"Sentiment (Manager): {'😊 Positive' if s==1 else '😞 Negative'}")
+                        st.write(f"Sentiment (Manager): {'Positive' if s==1 else ' Negative'}")
                     st.write(f"**Client Feedback:** {client_fb if client_fb else 'N/A'}")
                     if client_fb:
                         s_vec = vectorizer.transform([client_fb])
                         s = svm_clf.predict(s_vec)[0]
-                        st.write(f"Sentiment (Client): {'😊 Positive' if s==1 else '😞 Negative'}")
+                        st.write(f"Sentiment (Client): {' Positive' if s==1 else ' Negative'}")
 
         # --- Leave
         with tabs_tm[1]:
@@ -284,7 +284,7 @@ elif role == "Team Member":
                     md = {"type": "Leave", "employee": name, "leave_type": l_type, "from": str(f),
                           "to": str(t), "reason": r, "status": "Pending", "submitted": now()}
                     upsert_data(lid, md)
-                    st.success("✅ Leave Submitted.")
+                    st.success(" Leave Submitted.")
 
             with leave_tabs[1]:
                 df = df_all[(df_all["type"] == "Leave") & (df_all["employee"].str.lower() == name.lower())]
@@ -306,7 +306,7 @@ elif role == "Team Member":
 # CLIENT
 # ============================================================
 elif role == "Client":
-    st.header("🏢 Client Review Portal")
+    st.header("Client Review Portal")
     df = fetch_all()
     company = st.text_input("Enter Company Name").strip().lower()
     if company:
@@ -336,13 +336,13 @@ elif role == "Client":
                             t["feedback_similarity"] = "N/A"
 
                     upsert_data(t["_id"], t)
-                    st.success(f"✅ Review saved for {t['task']}")
+                    st.success(f" Review saved for {t['task']}")
 
 # ============================================================
 # HR ANALYTICS
 # ============================================================
 elif role == "HR Administrator":
-    st.header("👩‍💼 HR Analytics — Performance Insights")
+    st.header(" HR Analytics — Performance Insights")
     df = fetch_all()
     if df.empty:
         st.info("No data available.")
@@ -351,7 +351,7 @@ elif role == "HR Administrator":
         tasks["completion"] = pd.to_numeric(tasks["completion"], errors="coerce").fillna(0)
         tasks["marks"] = pd.to_numeric(tasks["marks"], errors="coerce").fillna(0)
 
-        st.subheader("📈 Employee Performance Statistics & Clusters")
+        st.subheader("Employee Performance Statistics & Clusters")
 
         if len(tasks) > 1:
             kmeans = KMeans(n_clusters=min(3, len(tasks)), n_init=10)
