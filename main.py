@@ -1,5 +1,6 @@
 # ============================================================
 # main.py — Enterprise Workforce Intelligence System (Final Stable Build v2)
+# (patched: safer text handling for vectorizer and string ops)
 # ============================================================
 
 import streamlit as st
@@ -106,6 +107,31 @@ def fetch_all():
         st.warning(f"Fetch failed: {e}")
         return pd.DataFrame()
 
+# ---------- Safe text helper ----------
+def safe_text(x):
+    """
+    Return a safe string for vectorizer and string operations.
+    If x is NaN/None, returns empty string.
+    Otherwise returns str(x).
+    """
+    try:
+        if x is None:
+            return ""
+        # pandas NA check
+        if isinstance(x, (float,)) and pd.isna(x):
+            return ""
+        if pd.isna(x):
+            return ""
+    except Exception:
+        pass
+    # if it is a list/dict/ndarray, convert to json-ish string
+    if isinstance(x, (list, dict, np.ndarray)):
+        try:
+            return json.dumps(x, ensure_ascii=False)
+        except Exception:
+            return str(x)
+    return str(x)
+
 # ============================================================
 # ML Models
 # ============================================================
@@ -157,43 +183,47 @@ if role == "Manager":
         else:
             search = st.text_input("Search by Employee or Task").strip().lower()
             if search:
-                df_tasks = df_all[df_all["type"] == "Task"]
-                df_tasks["completion"] = pd.to_numeric(df_tasks["completion"], errors="coerce").fillna(0)
+                df_tasks = df_all[df_all.get("type", "") == "Task"] if "type" in df_all.columns else df_all.copy()
+                # ensure columns exist and safe types
+                df_tasks = df_all[df_all["type"] == "Task"].copy() if "type" in df_all.columns else pd.DataFrame()
+                if "completion" in df_tasks.columns:
+                    df_tasks["completion"] = pd.to_numeric(df_tasks["completion"], errors="coerce").fillna(0)
+                # safe filtering
                 matched = df_tasks[df_tasks["employee"].astype(str).str.lower().str.contains(search, na=False) |
                                    df_tasks["task"].astype(str).str.lower().str.contains(search, na=False)]
                 for _, task in matched.iterrows():
-                    emp = task["employee"]
-                    st.markdown(f"### {emp} — {task['task']}")
-                    marks = st.slider("Marks", 0.0, 5.0, float(task.get("marks", 0)), key=f"m_{task['_id']}")
-                    fb = st.text_area("Feedback", task.get("manager_feedback", ""), key=f"f_{task['_id']}")
-                    if st.button(f"Save Feedback ({emp})", key=f"s_{task['_id']}"):
+                    emp = task.get("employee", "")
+                    st.markdown(f"### {emp} — {task.get('task','')}")
+                    marks = st.slider("Marks", 0.0, 5.0, float(task.get("marks", 0)), key=f"m_{task.get('_id','')}")
+                    fb = st.text_area("Feedback", safe_text(task.get("manager_feedback", "")), key=f"f_{task.get('_id','')}")
+                    if st.button(f"Save Feedback ({emp})", key=f"s_{task.get('_id','')}"):
                         task["marks"] = marks
                         task["manager_feedback"] = fb
                         task["status"] = "Under Client Review"
                         task["manager_reviewed_on"] = now()
-                        upsert_data(task["_id"], task)
+                        upsert_data(task.get("_id", str(uuid.uuid4())), task)
                         st.success(f"Feedback saved for {emp}")
 
     # --- Leave Management
     with tabs[2]:
         st.subheader("Leave Approvals")
-        df_leave = df_all[df_all["type"] == "Leave"]
+        df_leave = df_all[df_all["type"] == "Leave"] if "type" in df_all.columns else pd.DataFrame()
         if df_leave.empty:
             st.info("No leave data.")
         else:
             st.dataframe(df_leave[["employee", "leave_type", "from", "to", "reason", "status"]], use_container_width=True)
             search = st.text_input("Search by Employee").strip().lower()
             if search:
-                pending = df_leave[df_leave["employee"].astype(str).str.lower().str.contains(search, na=False)]
+                pending = df_leave[df_leave["employee"].astype(str).str.lower().str.contains(search, na=False)].copy()
                 pending = pending[pending["status"].astype(str).str.lower() == "pending"]
                 for i, row in pending.iterrows():
-                    st.markdown(f"**{row['employee']}** → {row['from']} to {row['to']} — {row['reason']}")
-                    dec = st.radio(f"Decision for {row['employee']}", ["Approve", "Reject"], key=f"d_{i}", horizontal=True)
-                    if st.button(f"Submit ({row['employee']})", key=f"b_{i}"):
+                    st.markdown(f"**{row.get('employee','')}** → {row.get('from','')} to {row.get('to','')} — {row.get('reason','')}")
+                    dec = st.radio(f"Decision for {row.get('employee','')}", ["Approve", "Reject"], key=f"d_{i}", horizontal=True)
+                    if st.button(f"Submit ({row.get('employee','')})", key=f"b_{i}"):
                         row["status"] = "Approved" if dec == "Approve" else "Rejected"
                         row["approved_on"] = now()
-                        upsert_data(row["_id"], row)
-                        st.success(f"Leave {row['status']} for {row['employee']}")
+                        upsert_data(row.get("_id", str(uuid.uuid4())), row)
+                        st.success(f"Leave {row['status']} for {row.get('employee','')}")
 
     # --- Meeting
     with tabs[3]:
@@ -214,13 +244,14 @@ if role == "Manager":
     with tabs[4]:
         st.subheader("360° Overview")
         if not df_all.empty:
-            tasks = df_all[df_all["type"] == "Task"]
-            leaves = df_all[df_all["type"] == "Leave"]
+            tasks = df_all[df_all["type"] == "Task"] if "type" in df_all.columns else pd.DataFrame()
+            leaves = df_all[df_all["type"] == "Leave"] if "type" in df_all.columns else pd.DataFrame()
             c1, c2, c3 = st.columns(3)
             c1.metric("Total Tasks", len(tasks))
             c2.metric("Total Leaves", len(leaves))
-            c3.metric("Avg Completion", f"{pd.to_numeric(tasks['completion'], errors='coerce').mean():.1f}%")
-            if not tasks.empty:
+            avg_completion = pd.to_numeric(tasks["completion"], errors="coerce").mean() if "completion" in tasks.columns else 0
+            c3.metric("Avg Completion", f"{avg_completion:.1f}%")
+            if not tasks.empty and "employee" in tasks.columns:
                 fig = px.bar(tasks, x="employee", y="completion", color="status", title="Task Completion by Employee")
                 st.plotly_chart(fig, use_container_width=True)
 
@@ -232,44 +263,66 @@ elif role == "Team Member":
     name = st.text_input("Enter Your Name")
     if name:
         df_all = fetch_all()
+        # normalize name for comparison
+        name_safe = name.strip().lower()
         tabs_tm = st.tabs(["My Tasks", "My Leave", "My Meetings", "My Feedback"])
 
         # --- Tasks
         with tabs_tm[0]:
-            my = df_all[(df_all["type"] == "Task") & (df_all["employee"].str.lower() == name.lower())]
-            if my.empty:
+            if df_all.empty or "type" not in df_all.columns or "employee" not in df_all.columns:
                 st.info("No assigned tasks.")
             else:
-                for _, t in my.iterrows():
-                    st.markdown(f"**{t['task']}**")
-                    val = st.slider("Progress", 0, 100, int(float(t["completion"])), key=t["_id"])
-                    if st.button(f"Update {t['task']}", key=f"u_{t['_id']}"):
-                        t["completion"] = val
-                        t["marks"] = float(lin_reg.predict([[val]])[0])
-                        t["status"] = "Completed" if val >= 100 else "In Progress"
-                        upsert_data(t["_id"], t)
-                        st.success("Progress updated.")
+                my = df_all[(df_all["type"] == "Task") & (df_all["employee"].astype(str).str.lower() == name_safe)].copy()
+                if my.empty:
+                    st.info("No assigned tasks.")
+                else:
+                    for _, t in my.iterrows():
+                        st.markdown(f"**{t.get('task','')}**")
+                        try:
+                            current_completion = int(float(t.get("completion", 0)))
+                        except Exception:
+                            current_completion = 0
+                        val = st.slider("Progress", 0, 100, current_completion, key=t.get("_id", str(uuid.uuid4())))
+                        if st.button(f"Update {t.get('task','')}", key=f"u_{t.get('_id','')}"):
+                            t["completion"] = val
+                            # predict marks via linear regression
+                            try:
+                                t["marks"] = float(lin_reg.predict([[val]])[0])
+                            except Exception:
+                                t["marks"] = 0.0
+                            t["status"] = "Completed" if val >= 100 else "In Progress"
+                            upsert_data(t.get("_id", str(uuid.uuid4())), t)
+                            st.success("Progress updated.")
 
         # --- Feedback (Manager + Client)
         with tabs_tm[3]:
-            df_tasks = df_all[(df_all["type"] == "Task") & (df_all["employee"].str.lower() == name.lower())]
-            if df_tasks.empty:
+            if df_all.empty or "type" not in df_all.columns or "employee" not in df_all.columns:
                 st.info("No feedback yet.")
             else:
-                for _, t in df_tasks.iterrows():
-                    st.markdown(f"### {t['task']}")
-                    mgr_fb = t.get("manager_feedback", "")
-                    client_fb = t.get("client_feedback", "")
-                    st.write(f"**Manager Feedback:** {mgr_fb if mgr_fb else 'N/A'}")
-                    if mgr_fb:
-                        s_vec = vectorizer.transform([mgr_fb])
-                        s = svm_clf.predict(s_vec)[0]
-                        st.write(f"Sentiment (Manager): {'Positive' if s==1 else ' Negative'}")
-                    st.write(f"**Client Feedback:** {client_fb if client_fb else 'N/A'}")
-                    if client_fb:
-                        s_vec = vectorizer.transform([client_fb])
-                        s = svm_clf.predict(s_vec)[0]
-                        st.write(f"Sentiment (Client): {' Positive' if s==1 else ' Negative'}")
+                df_tasks = df_all[(df_all["type"] == "Task") & (df_all["employee"].astype(str).str.lower() == name_safe)].copy()
+                if df_tasks.empty:
+                    st.info("No feedback yet.")
+                else:
+                    for _, t in df_tasks.iterrows():
+                        st.markdown(f"### {t.get('task','')}")
+                        mgr_fb = safe_text(t.get("manager_feedback", ""))
+                        client_fb = safe_text(t.get("client_feedback", ""))
+                        st.write(f"**Manager Feedback:** {mgr_fb if mgr_fb else 'N/A'}")
+                        if mgr_fb:
+                            try:
+                                s_vec = vectorizer.transform([mgr_fb])
+                                s = svm_clf.predict(s_vec)[0]
+                                st.write(f"Sentiment (Manager): {'Positive' if s == 1 else 'Negative'}")
+                            except Exception as e:
+                                st.write("Sentiment (Manager): N/A")
+                        st.write(f"**Client Feedback:** {client_fb if client_fb else 'N/A'}")
+                        if client_fb:
+                            try:
+                                s_vec = vectorizer.transform([client_fb])
+                                s = svm_clf.predict(s_vec)[0]
+                                st.write(f"Sentiment (Client): {'Positive' if s == 1 else 'Negative'}")
+                            except Exception:
+                                st.write("Sentiment (Client): N/A")
 
         # --- Leave
         with tabs_tm[1]:
@@ -287,20 +340,26 @@ elif role == "Team Member":
                     st.success(" Leave Submitted.")
 
             with leave_tabs[1]:
-                df = df_all[(df_all["type"] == "Leave") & (df_all["employee"].str.lower() == name.lower())]
-                if df.empty:
+                if df_all.empty or "type" not in df_all.columns or "employee" not in df_all.columns:
                     st.info("No leave history.")
                 else:
-                    st.dataframe(df[["leave_type", "from", "to", "reason", "status"]], use_container_width=True)
+                    df = df_all[(df_all["type"] == "Leave") & (df_all["employee"].astype(str).str.lower() == name_safe)].copy()
+                    if df.empty:
+                        st.info("No leave history.")
+                    else:
+                        st.dataframe(df[["leave_type", "from", "to", "reason", "status"]], use_container_width=True)
 
         # --- Meetings
         with tabs_tm[2]:
-            dfm = df_all[df_all["type"] == "Meeting"]
-            mine = dfm[dfm["attendees"].astype(str).str.lower().str.contains(name.lower(), na=False)]
-            if mine.empty:
+            if df_all.empty or "type" not in df_all.columns:
                 st.info("No meetings.")
             else:
-                st.dataframe(mine[["meeting_title", "meeting_date", "meeting_time", "attendees", "notes"]])
+                dfm = df_all[df_all["type"] == "Meeting"].copy()
+                mine = dfm[dfm["attendees"].astype(str).str.lower().str.contains(name_safe, na=False)]
+                if mine.empty:
+                    st.info("No meetings.")
+                else:
+                    st.dataframe(mine[["meeting_title", "meeting_date", "meeting_time", "attendees", "notes"]])
 
 # ============================================================
 # CLIENT
@@ -310,33 +369,40 @@ elif role == "Client":
     df = fetch_all()
     company = st.text_input("Enter Company Name").strip().lower()
     if company:
-        df_tasks = df[(df["type"] == "Task") & (df["company"].astype(str).str.lower() == company)]
-        pending = df_tasks[df_tasks["status"] == "Under Client Review"]
-        if pending.empty:
+        if df.empty or "type" not in df.columns or "company" not in df.columns:
             st.info("No tasks pending for review.")
         else:
-            st.subheader("Review Completed Tasks")
-            for _, t in pending.iterrows():
-                fb = st.text_area(f"Client Feedback for {t['employee']} - {t['task']}", key=f"cf_{t['_id']}")
-                rating = st.slider("Rating (1–5)", 1, 5, 3, key=f"cr_{t['_id']}")
-                if st.button(f"Submit Review ({t['task']})", key=f"sb_{t['_id']}"):
-                    t["client_feedback"] = fb
-                    t["client_rating"] = rating
-                    t["status"] = "Client Approved" if rating >= 3 else "Client Requires Changes"
-                    t["client_reviewed_on"] = now()
+            df_tasks = df[(df["type"] == "Task") & (df["company"].astype(str).str.lower() == company)].copy()
+            pending = df_tasks[df_tasks["status"] == "Under Client Review"] if not df_tasks.empty else pd.DataFrame()
+            if pending.empty:
+                st.info("No tasks pending for review.")
+            else:
+                st.subheader("Review Completed Tasks")
+                for _, t in pending.iterrows():
+                    fb_key = f"cf_{t.get('_id','')}"
+                    fb = st.text_area(f"Client Feedback for {t.get('employee','')} - {t.get('task','')}", key=fb_key)
+                    rating = st.slider("Rating (1–5)", 1, 5, 3, key=f"cr_{t.get('_id','')}")
+                    if st.button(f"Submit Review ({t.get('task','')})", key=f"sb_{t.get('_id','')}"):
+                        t["client_feedback"] = safe_text(fb)
+                        t["client_rating"] = rating
+                        t["status"] = "Client Approved" if rating >= 3 else "Client Requires Changes"
+                        t["client_reviewed_on"] = now()
 
-                    # Similarity check between client and manager feedback
-                    mfb = t.get("manager_feedback", "")
-                    if mfb and fb:
-                        try:
-                            vecs = vectorizer.transform([mfb, fb])
-                            sim = cosine_similarity(vecs)[0][1]
-                            t["feedback_similarity"] = round(float(sim), 2)
-                        except Exception:
+                        # Similarity check between client and manager feedback
+                        mfb = safe_text(t.get("manager_feedback", ""))
+                        cfb = safe_text(fb)
+                        if mfb and cfb:
+                            try:
+                                vecs = vectorizer.transform([mfb, cfb])
+                                sim = cosine_similarity(vecs)[0][1]
+                                t["feedback_similarity"] = round(float(sim), 2)
+                            except Exception:
+                                t["feedback_similarity"] = "N/A"
+                        else:
                             t["feedback_similarity"] = "N/A"
 
-                    upsert_data(t["_id"], t)
-                    st.success(f" Review saved for {t['task']}")
+                        upsert_data(t.get("_id", str(uuid.uuid4())), t)
+                        st.success(f" Review saved for {t.get('task','')}")
 
 # ============================================================
 # HR ANALYTICS
@@ -347,21 +413,28 @@ elif role == "HR Administrator":
     if df.empty:
         st.info("No data available.")
     else:
-        tasks = df[df["type"] == "Task"]
-        tasks["completion"] = pd.to_numeric(tasks["completion"], errors="coerce").fillna(0)
-        tasks["marks"] = pd.to_numeric(tasks["marks"], errors="coerce").fillna(0)
+        tasks = df[df["type"] == "Task"].copy() if "type" in df.columns else pd.DataFrame()
+        if not tasks.empty:
+            if "completion" in tasks.columns:
+                tasks["completion"] = pd.to_numeric(tasks["completion"], errors="coerce").fillna(0)
+            if "marks" in tasks.columns:
+                tasks["marks"] = pd.to_numeric(tasks["marks"], errors="coerce").fillna(0)
 
         st.subheader("Employee Performance Statistics & Clusters")
 
         if len(tasks) > 1:
-            kmeans = KMeans(n_clusters=min(3, len(tasks)), n_init=10)
-            tasks["cluster"] = kmeans.fit_predict(tasks[["completion", "marks"]])
-            fig = px.scatter(tasks, x="completion", y="marks", color="cluster",
-                             hover_data=["employee", "task"], title="Employee Performance Clusters")
-            st.plotly_chart(fig, use_container_width=True)
+            try:
+                kmeans = KMeans(n_clusters=min(3, len(tasks)), n_init=10)
+                tasks["cluster"] = kmeans.fit_predict(tasks[["completion", "marks"]])
+                fig = px.scatter(tasks, x="completion", y="marks", color="cluster",
+                                 hover_data=["employee", "task"], title="Employee Performance Clusters")
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Clustering failed: {e}")
 
-        by_emp = tasks.groupby("employee", dropna=True).agg({"completion": "mean", "marks": "mean"}).reset_index()
-        st.dataframe(by_emp, use_container_width=True)
-        fig2 = px.bar(by_emp, x="employee", y="completion", color="marks",
-                      title="Average Completion & Marks by Employee")
-        st.plotly_chart(fig2, use_container_width=True)
+        if not tasks.empty:
+            by_emp = tasks.groupby("employee", dropna=True).agg({"completion": "mean", "marks": "mean"}).reset_index()
+            st.dataframe(by_emp, use_container_width=True)
+            fig2 = px.bar(by_emp, x="employee", y="completion", color="marks",
+                          title="Average Completion & Marks by Employee")
+            st.plotly_chart(fig2, use_container_width=True)
